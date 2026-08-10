@@ -1,0 +1,30 @@
+node_modules/
+dist/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.env
+.env.*
+!.env.example
+
+# Native build, cache, and release staging outputs.
+native/build/
+native/build-cmake/
+native/dist/
+native/.cache/
+native/release/*
+!native/release/.gitignore
+!native/release/README.md
+
+# Optional local benchmark outputs; checked-in JSON summaries remain tracked.
+native/benchmark/*.csv
+native/benchmark/*-output.pt
+native/benchmark/*-resource.txt
+
+# Development-only model and audio artifacts.
+*.ckpt
+*.onnx
+*.wav
+*.mp3
+*.flac

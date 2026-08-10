@@ -1,0 +1,32 @@
+{
+  "runtime": "vocalarc-native-gpu",
+  "binaryBytes": 1119912,
+  "modelBytes": 267386408,
+  "inputSamples": 44100,
+  "inputSeconds": 1.0,
+  "threads": 28,
+  "timeBandGroup": 32,
+  "frequencyFrameGroup": 32,
+  "warmups": 1,
+  "repetitions": 1,
+  "inferenceMs": [
+    101.55092700006207
+  ],
+  "medianInferenceMs": 101.55092700006207,
+  "realTimeFactor": 9.847275938696145,
+  "nativeOutputRms": 2.059438884316478e-06,
+  "nativeBackend": "native-cuda-fused",
+  "nativeDevice": "NVIDIA GeForce RTX 5080",
+  "nativePeakRssBytes": 698572800,
+  "simd": "avx2-fma",
+  "pytorchMedianInferenceMs": 75.82177800031786,
+  "pytorchDevice": "cuda",
+  "pytorchMode": "eager",
+  "pytorchPeakRssBytes": 1622458368,
+  "pytorchOutputRms": 2.059422968159197e-06,
+  "outputMae": 4.33230029628362e-09,
+  "outputRmse": 5.501655131467942e-09,
+  "outputMaxAbs": 2.7468900043459143e-08,
+  "outputRelativeRmse": 0.002671454567462206,
+  "outputCorrelation": 0.9999964885955462
+}

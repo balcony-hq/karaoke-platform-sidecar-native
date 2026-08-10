@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "runtime": "vocalarc-native-cpu",
+  "model": "bs_leap_xe_voc",
+  "file": "model.f32",
+  "bytes": 267386408,
+  "sha256": "3a067a596fb6adc59c5399825652bfa1a96b785bf9448f8a2455adec2fd20799",
+  "precision": "fp32",
+  "sampleRate": 44100,
+  "channels": 2,
+  "nFft": 2048,
+  "hopLength": 512,
+  "featureDim": 256,
+  "bands": 90,
+  "transformerDepth": 16,
+  "stems": ["vocals"],
+  "runtimeDependencies": []
+}

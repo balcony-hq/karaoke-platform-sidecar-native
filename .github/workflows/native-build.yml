@@ -1,0 +1,92 @@
+name: Native sidecar build
+
+on:
+  pull_request:
+    paths:
+      - "native/**"
+      - ".github/workflows/native-build.yml"
+  push:
+    branches: [main]
+    tags:
+      - "vocalarc-native-v*"
+    paths:
+      - "native/**"
+      - ".github/workflows/native-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux x64 native CPU
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - name: Build self-contained CPU sidecar
+        run: make -C native
+      - name: Test embedded model loading
+        run: bash native/scripts/test_native.sh native/build/vocalarc-separation native/assets/model.f32
+      - name: Stage verified release asset
+        run: |
+          python3 native/scripts/package_release.py \
+            --cpu native/build/vocalarc-separation \
+            --model native/assets/model.f32 \
+            --target linux-x64 \
+            --output native/release/linux-x64
+      - name: Publish tagged Linux assets
+        if: startsWith(github.ref, 'refs/tags/vocalarc-native-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber \
+            native/release/linux-x64/vocalarc-native-linux-x64 \
+            native/release/linux-x64/vocalarc-native-manifest.json
+
+  windows:
+    name: Windows x64 native CPU
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - name: Configure with MSVC CMake
+        run: cmake -S native -B native/build-cmake -A x64
+      - name: Build self-contained CPU sidecar
+        run: cmake --build native/build-cmake --config Release --target vocalarc-separation
+      - name: Test embedded model loading
+        shell: pwsh
+        run: |
+          $env:VOCALARC_NATIVE_MODEL = "$pwd\missing-model.f32"
+          $binary = "$pwd\native\build-cmake\Release\vocalarc-separation.exe"
+          @(
+            '{"id":1,"type":"ping"}'
+            '{"id":2,"type":"load"}'
+            '{"id":3,"type":"shutdown"}'
+          ) | & $binary --threads 1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Stage verified release asset
+        run: |
+          python native/scripts/package_release.py --cpu native/build-cmake/Release/vocalarc-separation.exe --model native/assets/model.f32 --target win32-x64 --output native/release/win32-x64
+      - name: Publish tagged Windows assets
+        if: startsWith(github.ref, 'refs/tags/vocalarc-native-v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --title $env:GITHUB_REF_NAME --generate-notes
+          }
+          Copy-Item native/release/win32-x64/vocalarc-native-manifest.json native/release/win32-x64/vocalarc-native-manifest-win32-x64.json
+          gh release upload $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --clobber native/release/win32-x64/vocalarc-native-win32-x64.exe native/release/win32-x64/vocalarc-native-manifest-win32-x64.json

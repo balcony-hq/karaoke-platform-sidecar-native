@@ -1,0 +1,4 @@
+# Platform binaries and manifests are generated for GitHub Releases.
+*
+!.gitignore
+!README.md

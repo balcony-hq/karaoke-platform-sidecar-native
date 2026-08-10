@@ -11,6 +11,7 @@ __pycache__/
 # Native build, cache, and release staging outputs.
 native/build/
 native/build-cmake/
+native/build-cuda*/
 native/dist/
 native/.cache/
 native/release/*

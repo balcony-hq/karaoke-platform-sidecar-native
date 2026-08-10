@@ -68,8 +68,10 @@ python3 native/scripts/package_release.py \
 ```
 
 Add `--gpu native/build/vocalarc-separation-gpu` when a CUDA build is
-available. The root GitHub Actions workflow builds and tests Linux and Windows
-CPU releases; GPU artifacts are optional additions.
+available. For a self-contained Windows GPU release, pass each required CUDA
+DLL with `--gpu-runtime-dll`; add `--gpu-archive` to publish the GPU executable
+and its DLLs as one ZIP asset. The root GitHub Actions workflow builds and tests
+Linux and Windows CPU releases; GPU artifacts are optional additions.
 
 ## Repository layout
 

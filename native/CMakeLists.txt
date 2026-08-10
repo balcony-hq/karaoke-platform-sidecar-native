@@ -21,13 +21,25 @@ else()
   target_compile_options(vocalarc-embed-model PRIVATE -O2)
 endif()
 
+set(VOCALARC_FEATURE_SOURCE native_cpu_features.c)
+set(VOCALARC_SIMD_SOURCE native_simd.c)
+if(MSVC)
+  # Keep the scalar translation unit safe on older CPUs while compiling the
+  # AVX2/FMA translation unit with the instructions it dispatches at runtime.
+  set_source_files_properties(${VOCALARC_SIMD_SOURCE} PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+endif()
+
 function(configure_cpu_target target)
   if(NOT MSVC)
     target_compile_definitions(${target} PRIVATE _POSIX_C_SOURCE=200809L)
-    target_compile_options(${target} PRIVATE -O3 -ffast-math -fno-math-errno -funroll-loops)
+    target_compile_options(${target} PRIVATE
+      $<$<COMPILE_LANGUAGE:C,CXX>:-O3 -ffast-math -fno-math-errno -funroll-loops>
+    )
     target_link_libraries(${target} PRIVATE m)
   else()
-    target_compile_options(${target} PRIVATE /O2 /fp:fast)
+    target_compile_options(${target} PRIVATE
+      $<$<COMPILE_LANGUAGE:C,CXX>:/O2 /fp:fast>
+    )
     set_property(TARGET ${target} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
     target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
   endif()
@@ -41,7 +53,8 @@ function(configure_cpu_target target)
   endif()
 endfunction()
 
-add_executable(vocalarc-separation-core vocalarc_separation.c native_gpu.c)
+add_executable(vocalarc-separation-core vocalarc_separation.c native_gpu.c
+  ${VOCALARC_FEATURE_SOURCE} ${VOCALARC_SIMD_SOURCE})
 configure_cpu_target(vocalarc-separation-core)
 
 set(VOCALARC_CPU_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/vocalarc-separation${CMAKE_EXECUTABLE_SUFFIX}")
@@ -58,10 +71,15 @@ add_custom_target(vocalarc-separation ALL DEPENDS "${VOCALARC_CPU_OUTPUT}")
 
 if(VOCALARC_CUDA)
   enable_language(CUDA)
-  add_executable(vocalarc-separation-gpu-core vocalarc_separation.c native_gpu_cuda.cu)
+  add_executable(vocalarc-separation-gpu-core vocalarc_separation.c native_gpu_cuda.cu
+    ${VOCALARC_FEATURE_SOURCE} ${VOCALARC_SIMD_SOURCE})
   set_target_properties(vocalarc-separation-gpu-core PROPERTIES
     CUDA_STANDARD 14
     CUDA_SEPARABLE_COMPILATION ON
+  )
+  target_compile_options(vocalarc-separation-gpu-core PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+    $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>
   )
   configure_cpu_target(vocalarc-separation-gpu-core)
   target_link_libraries(vocalarc-separation-gpu-core PRIVATE cublas)

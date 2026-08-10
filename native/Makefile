@@ -27,19 +27,25 @@ $(BUILD):
 $(BUILD)/embed-model: $(ROOT)/embed_model.c | $(BUILD)
 	$(CC) $(CFLAGS) -O2 -o $@ $(ROOT)/embed_model.c
 
-$(BUILD)/vocalarc-separation-core: $(ROOT)/vocalarc_separation.c $(ROOT)/native_gpu.c $(ROOT)/native_gpu.h | $(BUILD)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(ROOT)/vocalarc_separation.c $(ROOT)/native_gpu.c $(LDLIBS)
+$(BUILD)/vocalarc-separation-core: $(ROOT)/vocalarc_separation.c $(ROOT)/native_gpu.c $(ROOT)/native_gpu.h $(ROOT)/native_cpu_features.c $(ROOT)/native_simd.c $(ROOT)/native_simd.h | $(BUILD)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(ROOT)/vocalarc_separation.c $(ROOT)/native_gpu.c $(ROOT)/native_cpu_features.c $(ROOT)/native_simd.c $(LDLIBS)
 
 $(BUILD)/vocalarc-separation: $(BUILD)/vocalarc-separation-core $(BUILD)/embed-model $(ROOT)/assets/model.f32
 	$(BUILD)/embed-model $(BUILD)/vocalarc-separation-core $(ROOT)/assets/model.f32 $@
 
-$(BUILD)/vocalarc-gpu-host.o: $(ROOT)/vocalarc_separation.c $(ROOT)/native_gpu.h | $(BUILD)
+$(BUILD)/vocalarc-gpu-host.o: $(ROOT)/vocalarc_separation.c $(ROOT)/native_gpu.h $(ROOT)/native_simd.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $(ROOT)/vocalarc_separation.c -o $@
+
+$(BUILD)/vocalarc-native-simd.o: $(ROOT)/native_simd.c $(ROOT)/native_simd.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $(ROOT)/native_simd.c -o $@
+
+$(BUILD)/vocalarc-cpu-features.o: $(ROOT)/native_cpu_features.c $(ROOT)/native_simd.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $(ROOT)/native_cpu_features.c -o $@
 
 $(BUILD)/native_gpu_cuda.o: $(ROOT)/native_gpu_cuda.cu $(ROOT)/native_gpu.h | $(BUILD)
 	$(NVCC) -O3 --use_fast_math -std=c++14 -arch=$(CUDA_ARCH) -c $(ROOT)/native_gpu_cuda.cu -o $@
 
-$(BUILD)/vocalarc-separation-gpu-core: $(BUILD)/vocalarc-gpu-host.o $(BUILD)/native_gpu_cuda.o | $(BUILD)
+$(BUILD)/vocalarc-separation-gpu-core: $(BUILD)/vocalarc-gpu-host.o $(BUILD)/native_gpu_cuda.o $(BUILD)/vocalarc-cpu-features.o $(BUILD)/vocalarc-native-simd.o | $(BUILD)
 	$(NVCC) -O3 --use_fast_math -arch=$(CUDA_ARCH) $^ -lcublas -o $@
 
 $(BUILD)/vocalarc-separation-gpu: $(BUILD)/vocalarc-separation-gpu-core $(BUILD)/embed-model $(ROOT)/assets/model.f32

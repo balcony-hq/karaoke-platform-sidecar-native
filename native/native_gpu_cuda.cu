@@ -54,6 +54,10 @@ struct native_gpu {
     float *mask_hidden;
     float *mask_projection;
     float *mask_output;
+    const float **batched_a;
+    const float **batched_b;
+    float **batched_c;
+    int batched_capacity;
     int64_t capacity_tokens;
     int64_t score_capacity;
     int mask_capacity_frames;
@@ -189,6 +193,8 @@ static int ensure_buffers(native_gpu *gpu, int64_t tokens) {
     if (gpu->mask_output != NULL) cudaFree(gpu->mask_output);
     gpu->data = gpu->resident_alt = gpu->resident_current = NULL;
     gpu->normed = gpu->qkv = gpu->packed_qkv = gpu->attention = gpu->gates = NULL;
+    gpu->mask_features = gpu->mask_hidden = gpu->mask_projection = gpu->mask_output = NULL;
+    gpu->mask_capacity_frames = 0;
     gpu->scores = NULL;
     gpu->score_capacity = 0;
     if (!cuda_ok(gpu, cudaMalloc((void **)&gpu->data, (size_t)tokens * DIM * sizeof(float)), "cudaMalloc(data)")) return 0;
@@ -221,13 +227,31 @@ static int ensure_mask_buffers(native_gpu *gpu, int frames) {
     gpu->mask_features = gpu->mask_hidden = gpu->mask_projection = gpu->mask_output = NULL;
     gpu->mask_capacity_frames = 0;
     size_t feature_values = (size_t)frames * BANDS * DIM;
-    size_t hidden_values = (size_t)frames * FF_DIM;
-    size_t projection_values = (size_t)frames * FREQ_BINS * CHANNELS * 2;
+    size_t hidden_values = (size_t)frames * BANDS * FF_DIM;
+    size_t projection_values = (size_t)frames * FREQ_BINS * CHANNELS * 4;
+    size_t mask_values = (size_t)frames * FREQ_BINS * CHANNELS * 2;
     if (!cuda_ok(gpu, cudaMalloc((void **)&gpu->mask_features, feature_values * sizeof(float)), "cudaMalloc(mask_features)")) return 0;
     if (!cuda_ok(gpu, cudaMalloc((void **)&gpu->mask_hidden, hidden_values * sizeof(float)), "cudaMalloc(mask_hidden)")) return 0;
     if (!cuda_ok(gpu, cudaMalloc((void **)&gpu->mask_projection, projection_values * sizeof(float)), "cudaMalloc(mask_projection)")) return 0;
-    if (!cuda_ok(gpu, cudaMalloc((void **)&gpu->mask_output, projection_values * sizeof(float)), "cudaMalloc(mask_output)")) return 0;
+    if (!cuda_ok(gpu, cudaMalloc((void **)&gpu->mask_output, mask_values * sizeof(float)), "cudaMalloc(mask_output)")) return 0;
     gpu->mask_capacity_frames = frames;
+    return 1;
+}
+
+static int ensure_batched_pointer_buffers(native_gpu *gpu, int count) {
+    if (gpu->batched_capacity >= count) return 1;
+    if (gpu->batched_a != NULL) cudaFree((void *)gpu->batched_a);
+    if (gpu->batched_b != NULL) cudaFree((void *)gpu->batched_b);
+    if (gpu->batched_c != NULL) cudaFree(gpu->batched_c);
+    gpu->batched_a = NULL;
+    gpu->batched_b = NULL;
+    gpu->batched_c = NULL;
+    gpu->batched_capacity = 0;
+    size_t bytes = (size_t)count * sizeof(float *);
+    if (!cuda_ok(gpu, cudaMalloc((void **)&gpu->batched_a, bytes), "cudaMalloc(batched_a)")) return 0;
+    if (!cuda_ok(gpu, cudaMalloc((void **)&gpu->batched_b, bytes), "cudaMalloc(batched_b)")) return 0;
+    if (!cuda_ok(gpu, cudaMalloc((void **)&gpu->batched_c, bytes), "cudaMalloc(batched_c)")) return 0;
+    gpu->batched_capacity = count;
     return 1;
 }
 
@@ -426,12 +450,16 @@ __global__ static void pack_mask_features_kernel(const float *source, float *des
     destination[((int64_t)band * frames + frame) * DIM + dim] = source[index];
 }
 
-__global__ static void tanh_kernel(float *values, const float *bias, int64_t count, int width) {
+__global__ static void tanh_batched_kernel(float *values, const float *const *biases,
+                                           int frames, int width, int bands) {
     int64_t index = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (index < count) {
-        float value = values[index] + (bias == NULL ? 0.0f : bias[index % width]);
-        values[index] = tanhf(value);
-    }
+    int64_t band_values = (int64_t)frames * width;
+    int64_t total = band_values * bands;
+    if (index >= total) return;
+    int band = (int)(index / band_values);
+    int column = (int)(index % width);
+    float value = values[index] + biases[band][column];
+    values[index] = tanhf(value);
 }
 
 __global__ static void write_mask_band_kernel(const float *projection, const float *bias,
@@ -557,6 +585,13 @@ extern "C" void native_gpu_destroy(native_gpu *gpu) {
     if (gpu->attention != NULL) cudaFree(gpu->attention);
     if (gpu->gates != NULL) cudaFree(gpu->gates);
     if (gpu->scores != NULL) cudaFree(gpu->scores);
+    if (gpu->mask_features != NULL) cudaFree(gpu->mask_features);
+    if (gpu->mask_hidden != NULL) cudaFree(gpu->mask_hidden);
+    if (gpu->mask_projection != NULL) cudaFree(gpu->mask_projection);
+    if (gpu->mask_output != NULL) cudaFree(gpu->mask_output);
+    if (gpu->batched_a != NULL) cudaFree((void *)gpu->batched_a);
+    if (gpu->batched_b != NULL) cudaFree((void *)gpu->batched_b);
+    if (gpu->batched_c != NULL) cudaFree(gpu->batched_c);
     for (size_t i = 0; i < gpu->weight_count; i++) cudaFree(gpu->weights[i].device_weight);
     for (size_t i = 0; i < gpu->vector_count; i++) cudaFree(gpu->vectors[i].device_values);
     if (gpu->handle != NULL) cublasDestroy(gpu->handle);
@@ -720,25 +755,85 @@ extern "C" int native_gpu_resident_mask(native_gpu *gpu, int frames, const float
     size_t output_values = (size_t)frames * FREQ_BINS * CHANNELS * 2;
     if (!cuda_ok(gpu, cudaMemset(gpu->mask_output, 0, output_values * sizeof(float)), "cudaMemset(mask_output)")) return 0;
 
+    if (!ensure_batched_pointer_buffers(gpu, BANDS)) return 0;
+    const float *first_weights[BANDS];
+    const float *first_inputs[BANDS];
+    float *first_outputs[BANDS];
+    const float *first_biases[BANDS];
+    const float *second_biases[BANDS];
+    size_t projection_offsets[BANDS];
+    size_t projection_cursor = 0;
     for (int band = 0; band < BANDS; band++) {
         const native_gpu_mask_band *weights = &bands[band];
-        float *input = gpu->mask_features + (size_t)band * frames * DIM;
         int projection_width = weights->input_dim * 2;
+        weight_entry *first_weight = get_weight(gpu, weights->first_weight, DIM, FF_DIM);
         vector_entry *first_bias_entry = get_vector(gpu, weights->first_bias, FF_DIM);
         vector_entry *second_bias_entry = get_vector(gpu, weights->second_bias, projection_width);
-        float *first_bias = first_bias_entry == NULL ? NULL : first_bias_entry->device_values;
-        float *second_bias = second_bias_entry == NULL ? NULL : second_bias_entry->device_values;
-        if (first_bias == NULL || second_bias == NULL) return 0;
-        if (!device_matmul(gpu, frames, DIM, FF_DIM, input,
-                           weights->first_weight, gpu->mask_hidden)) return 0;
-        tanh_kernel<<<(unsigned)(((int64_t)frames * FF_DIM + 255) / 256), 256>>>(
-            gpu->mask_hidden, first_bias, (int64_t)frames * FF_DIM, FF_DIM);
-        if (!launch_ok(gpu, "mask_tanh_kernel")) return 0;
-        if (!device_matmul(gpu, frames, FF_DIM, weights->input_dim * 2,
-                           gpu->mask_hidden, weights->second_weight, gpu->mask_projection)) return 0;
+        if (first_weight == NULL || first_bias_entry == NULL || second_bias_entry == NULL) return 0;
+        first_weights[band] = first_weight->device_weight;
+        first_inputs[band] = gpu->mask_features + (size_t)band * frames * DIM;
+        first_outputs[band] = gpu->mask_hidden + (size_t)band * frames * FF_DIM;
+        first_biases[band] = first_bias_entry->device_values;
+        second_biases[band] = second_bias_entry->device_values;
+        projection_offsets[band] = projection_cursor;
+        projection_cursor += (size_t)frames * projection_width;
+    }
+    if (projection_cursor > (size_t)frames * FREQ_BINS * CHANNELS * 4) return 0;
+
+    size_t pointer_bytes = (size_t)BANDS * sizeof(float *);
+    if (!cuda_ok(gpu, cudaMemcpy((void *)gpu->batched_a, first_weights, pointer_bytes,
+                                 cudaMemcpyHostToDevice), "cudaMemcpy(mask_first_weights)")) return 0;
+    if (!cuda_ok(gpu, cudaMemcpy((void *)gpu->batched_b, first_inputs, pointer_bytes,
+                                 cudaMemcpyHostToDevice), "cudaMemcpy(mask_first_inputs)")) return 0;
+    if (!cuda_ok(gpu, cudaMemcpy(gpu->batched_c, first_outputs, pointer_bytes,
+                                 cudaMemcpyHostToDevice), "cudaMemcpy(mask_first_outputs)")) return 0;
+    const float alpha = 1.0f, beta = 0.0f;
+    if (!cublas_ok(gpu, cublasSgemmBatched(
+            gpu->handle, CUBLAS_OP_T, CUBLAS_OP_N,
+            FF_DIM, frames, DIM, &alpha,
+            gpu->batched_a, DIM, gpu->batched_b, DIM, &beta,
+            gpu->batched_c, FF_DIM, BANDS), "cublasSgemmBatched(mask_first)")) return 0;
+    if (!cuda_ok(gpu, cudaMemcpy((void *)gpu->batched_a, first_biases, pointer_bytes,
+                                 cudaMemcpyHostToDevice), "cudaMemcpy(mask_first_biases)")) return 0;
+    tanh_batched_kernel<<<(unsigned)(((int64_t)frames * FF_DIM * BANDS + 255) / 256), 256>>>(
+        gpu->mask_hidden, gpu->batched_a, frames, FF_DIM, BANDS);
+    if (!launch_ok(gpu, "mask_tanh_batched_kernel")) return 0;
+
+    for (int first = 0; first < BANDS;) {
+        int end = first + 1;
+        while (end < BANDS && bands[end].input_dim == bands[first].input_dim) end++;
+        int count = end - first;
+        for (int slot = 0; slot < count; slot++) {
+            int band = first + slot;
+            const native_gpu_mask_band *weights = &bands[band];
+            weight_entry *second_weight = get_weight(gpu, weights->second_weight, FF_DIM,
+                                                      weights->input_dim * 2);
+            if (second_weight == NULL) return 0;
+            first_weights[slot] = second_weight->device_weight;
+            first_inputs[slot] = gpu->mask_hidden + (size_t)band * frames * FF_DIM;
+            first_outputs[slot] = gpu->mask_projection + projection_offsets[band];
+        }
+        size_t group_bytes = (size_t)count * sizeof(float *);
+        if (!cuda_ok(gpu, cudaMemcpy((void *)gpu->batched_a, first_weights, group_bytes,
+                                     cudaMemcpyHostToDevice), "cudaMemcpy(mask_second_weights)")) return 0;
+        if (!cuda_ok(gpu, cudaMemcpy((void *)gpu->batched_b, first_inputs, group_bytes,
+                                     cudaMemcpyHostToDevice), "cudaMemcpy(mask_second_inputs)")) return 0;
+        if (!cuda_ok(gpu, cudaMemcpy(gpu->batched_c, first_outputs, group_bytes,
+                                     cudaMemcpyHostToDevice), "cudaMemcpy(mask_second_outputs)")) return 0;
+        int projection_width = bands[first].input_dim * 2;
+        if (!cublas_ok(gpu, cublasSgemmBatched(
+                gpu->handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                projection_width, frames, FF_DIM, &alpha,
+                gpu->batched_a, FF_DIM, gpu->batched_b, FF_DIM, &beta,
+                gpu->batched_c, projection_width, count), "cublasSgemmBatched(mask_second)")) return 0;
+        first = end;
+    }
+
+    for (int band = 0; band < BANDS; band++) {
+        const native_gpu_mask_band *weights = &bands[band];
         write_mask_band_kernel<<<(unsigned)(((int64_t)frames * weights->input_dim + 255) / 256), 256>>>(
-            gpu->mask_projection, second_bias, gpu->mask_output, frames, weights->input_dim,
-            weights->first_frequency);
+            gpu->mask_projection + projection_offsets[band], second_biases[band],
+            gpu->mask_output, frames, weights->input_dim, weights->first_frequency);
         if (!launch_ok(gpu, "write_mask_band_kernel")) return 0;
     }
     int ok = cuda_ok(gpu, cudaMemcpy(mask, gpu->mask_output,

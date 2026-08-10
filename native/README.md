@@ -71,5 +71,8 @@ python3 native/scripts/package_release.py \
 ```
 
 Pass `--gpu native/build/vocalarc-separation-gpu` to include the optional
-CUDA artifact. The generated release directory is ignored except for its
-documentation; the GitHub Actions workflow publishes the verified binaries.
+CUDA artifact. For Windows, pass `--gpu-runtime-dll` once per required CUDA DLL
+and optionally `--gpu-archive` to group the GPU executable and DLLs into a
+single ZIP release asset. The generated release directory is ignored except
+for its documentation; the GitHub Actions workflow publishes the verified
+binaries.

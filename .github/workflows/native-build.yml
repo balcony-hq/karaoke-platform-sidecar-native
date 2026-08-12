@@ -156,7 +156,7 @@ jobs:
         include:
           - runner: macos-14
             target: darwin-x64
-            sdk: source
+            sdk: onnxruntime-osx-x86_64-1.20.1.tgz
             architecture: x86_64
           - runner: macos-14
             target: darwin-arm64

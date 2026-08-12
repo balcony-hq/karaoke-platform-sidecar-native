@@ -52,6 +52,10 @@ jobs:
           printf '%s\n' '{"id":1,"type":"ping"}' '{"id":2,"type":"shutdown"}' | \
             "$RUNNER_TEMP/vocalarc-onnx-sidecar" \
             --model "$RUNNER_TEMP/vocalarc-onnx-model-cuda-linux-x64.onnx" --provider cpu
+      - name: Stage CUDA user-space dependencies
+        run: |
+          python3 -m pip install --target "$RUNNER_TEMP/cuda-libs" \
+            nvidia-cublas-cu12==12.8.4.1 nvidia-cuda-runtime-cu12==12.8.90 nvidia-curand-cu12==10.3.9.90
       - name: Stage and validate bundle
         run: |
           ort="$RUNNER_TEMP/onnxruntime-linux-x64-gpu_cuda12-1.28.0"
@@ -60,7 +64,11 @@ jobs:
             --model "$RUNNER_TEMP/vocalarc-onnx-model-cuda-linux-x64.onnx" \
             --ort-root "$ort" --provider cuda --target linux-x64 \
             --release-version "${{ github.event.release.tag_name || inputs.release_tag }}" \
-            --output "$RUNNER_TEMP/bundle-linux-x64"
+            --output "$RUNNER_TEMP/bundle-linux-x64" \
+            --dependency "$RUNNER_TEMP/cuda-libs/nvidia/cublas/lib/libcublasLt.so.12" \
+            --dependency "$RUNNER_TEMP/cuda-libs/nvidia/cublas/lib/libcublas.so.12" \
+            --dependency "$RUNNER_TEMP/cuda-libs/nvidia/curand/lib/libcurand.so.10" \
+            --dependency "$RUNNER_TEMP/cuda-libs/nvidia/cuda_runtime/lib/libcudart.so.12"
           test "$(stat -c%s "$RUNNER_TEMP/bundle-linux-x64/models/model.onnx")" -lt $((2 * 1024 * 1024 * 1024))
       - name: Upload Linux release assets
         run: |
@@ -72,13 +80,21 @@ jobs:
           cp "$bundle/runtime/libonnxruntime.so.1" "$RUNNER_TEMP/vocalarc-onnx-ort-core-linux-x64.so"
           cp "$bundle/runtime/libonnxruntime_providers_cuda.so" "$RUNNER_TEMP/vocalarc-onnx-ort-cuda-linux-x64.so"
           cp "$bundle/runtime/libonnxruntime_providers_shared.so" "$RUNNER_TEMP/vocalarc-onnx-ort-shared-linux-x64.so"
+          cp "$bundle/runtime/libcublasLt.so.12" "$RUNNER_TEMP/vocalarc-onnx-cuda-cublasLt-linux-x64.so"
+          cp "$bundle/runtime/libcublas.so.12" "$RUNNER_TEMP/vocalarc-onnx-cuda-cublas-linux-x64.so"
+          cp "$bundle/runtime/libcurand.so.10" "$RUNNER_TEMP/vocalarc-onnx-cuda-curand-linux-x64.so"
+          cp "$bundle/runtime/libcudart.so.12" "$RUNNER_TEMP/vocalarc-onnx-cuda-cudart-linux-x64.so"
           gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber \
             "$RUNNER_TEMP/vocalarc-onnx-manifest-linux-x64.json" \
             "$RUNNER_TEMP/vocalarc-onnx-model-cuda-linux-x64.onnx" \
             "$RUNNER_TEMP/vocalarc-onnx-sidecar-linux-x64" \
             "$RUNNER_TEMP/vocalarc-onnx-ort-core-linux-x64.so" \
             "$RUNNER_TEMP/vocalarc-onnx-ort-cuda-linux-x64.so" \
-            "$RUNNER_TEMP/vocalarc-onnx-ort-shared-linux-x64.so"
+            "$RUNNER_TEMP/vocalarc-onnx-ort-shared-linux-x64.so" \
+            "$RUNNER_TEMP/vocalarc-onnx-cuda-cublasLt-linux-x64.so" \
+            "$RUNNER_TEMP/vocalarc-onnx-cuda-cublas-linux-x64.so" \
+            "$RUNNER_TEMP/vocalarc-onnx-cuda-curand-linux-x64.so" \
+            "$RUNNER_TEMP/vocalarc-onnx-cuda-cudart-linux-x64.so"
         env:
           GH_TOKEN: ${{ github.token }}
 

@@ -160,7 +160,7 @@ jobs:
             architecture: x86_64
           - runner: macos-14
             target: darwin-arm64
-            sdk: source
+            sdk: onnxruntime-osx-arm64-1.28.0.tgz
             architecture: arm64
     runs-on: ${{ matrix.runner }}
     steps:

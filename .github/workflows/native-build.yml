@@ -1,92 +1,190 @@
-name: Native sidecar build
+name: ONNX sidecar release
 
 on:
   pull_request:
     paths:
-      - "native/**"
+      - "onnx/**"
       - ".github/workflows/native-build.yml"
-  push:
-    branches: [main]
-    tags:
-      - "vocalarc-native-v*"
-    paths:
-      - "native/**"
-      - ".github/workflows/native-build.yml"
+  release:
+    types: [published]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Published vocalarc-onnx release to complete"
+        required: true
+        type: string
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   linux:
-    name: Linux x64 native CPU
+    if: >-
+      (github.event_name == 'release' && startsWith(github.event.release.tag_name, 'vocalarc-onnx-v')) ||
+      (github.event_name == 'workflow_dispatch' && startsWith(inputs.release_tag, 'vocalarc-onnx-v'))
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
-        with:
-          lfs: true
-      - name: Build self-contained CPU sidecar
-        run: make -C native
-      - name: Test embedded model loading
-        run: bash native/scripts/test_native.sh native/build/vocalarc-separation native/assets/model.f32
-      - name: Stage verified release asset
+      - name: Download ONNX Runtime GPU SDK
         run: |
-          python3 native/scripts/package_release.py \
-            --cpu native/build/vocalarc-separation \
-            --model native/assets/model.f32 \
-            --target linux-x64 \
-            --output native/release/linux-x64
-      - name: Publish tagged Linux assets
-        if: startsWith(github.ref, 'refs/tags/vocalarc-native-v')
+          gh release download v1.28.0 --repo microsoft/onnxruntime \
+            --pattern onnxruntime-linux-x64-gpu_cuda12-1.28.0.tgz --dir "$RUNNER_TEMP"
+          tar -xzf "$RUNNER_TEMP/onnxruntime-linux-x64-gpu_cuda12-1.28.0.tgz" -C "$RUNNER_TEMP"
         env:
           GH_TOKEN: ${{ github.token }}
+      - name: Build C++ sidecar
         run: |
-          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
-            || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
-          gh release upload "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --clobber \
-            native/release/linux-x64/vocalarc-native-linux-x64 \
-            native/release/linux-x64/vocalarc-native-manifest.json
+          ort="$RUNNER_TEMP/onnxruntime-linux-x64-gpu_cuda12-1.28.0"
+          g++ -std=c++17 -O3 -Wall -Wextra -Wpedantic \
+            -I"$ort/include" onnx/native/onnx_sidecar.cpp \
+            -L"$ort/lib" -Wl,-rpath,'$ORIGIN' -lonnxruntime \
+            -o "$RUNNER_TEMP/vocalarc-onnx-sidecar"
+      - name: Download CUDA graph from this release
+        run: |
+          tag="${{ github.event.release.tag_name || inputs.release_tag }}"
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+            --pattern vocalarc-onnx-model-cuda-linux-x64.onnx --dir "$RUNNER_TEMP"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Smoke-test JSONL protocol
+        run: |
+          export LD_LIBRARY_PATH="$RUNNER_TEMP/onnxruntime-linux-x64-gpu_cuda12-1.28.0/lib"
+          printf '%s\n' '{"id":1,"type":"ping"}' '{"id":2,"type":"shutdown"}' | \
+            "$RUNNER_TEMP/vocalarc-onnx-sidecar" \
+            --model "$RUNNER_TEMP/vocalarc-onnx-model-cuda-linux-x64.onnx" --provider cpu
+      - name: Stage and validate bundle
+        run: |
+          ort="$RUNNER_TEMP/onnxruntime-linux-x64-gpu_cuda12-1.28.0"
+          python3 onnx/package_runtime.py \
+            --sidecar "$RUNNER_TEMP/vocalarc-onnx-sidecar" \
+            --model "$RUNNER_TEMP/vocalarc-onnx-model-cuda-linux-x64.onnx" \
+            --ort-root "$ort" --provider cuda --target linux-x64 \
+            --release-version "${{ github.event.release.tag_name || inputs.release_tag }}" \
+            --output "$RUNNER_TEMP/bundle-linux-x64"
+          test "$(stat -c%s "$RUNNER_TEMP/bundle-linux-x64/models/model.onnx")" -lt $((2 * 1024 * 1024 * 1024))
+      - name: Upload Linux release assets
+        run: |
+          tag="${{ github.event.release.tag_name || inputs.release_tag }}"
+          bundle="$RUNNER_TEMP/bundle-linux-x64"
+          cp "$bundle/manifest.json" "$RUNNER_TEMP/vocalarc-onnx-manifest-linux-x64.json"
+          cp "$bundle/models/model.onnx" "$RUNNER_TEMP/vocalarc-onnx-model-cuda-linux-x64.onnx"
+          cp "$bundle/runtime/vocalarc-onnx-sidecar" "$RUNNER_TEMP/vocalarc-onnx-sidecar-linux-x64"
+          cp "$bundle/runtime/libonnxruntime.so.1" "$RUNNER_TEMP/vocalarc-onnx-ort-core-linux-x64.so"
+          cp "$bundle/runtime/libonnxruntime_providers_cuda.so" "$RUNNER_TEMP/vocalarc-onnx-ort-cuda-linux-x64.so"
+          cp "$bundle/runtime/libonnxruntime_providers_shared.so" "$RUNNER_TEMP/vocalarc-onnx-ort-shared-linux-x64.so"
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber \
+            "$RUNNER_TEMP/vocalarc-onnx-manifest-linux-x64.json" \
+            "$RUNNER_TEMP/vocalarc-onnx-model-cuda-linux-x64.onnx" \
+            "$RUNNER_TEMP/vocalarc-onnx-sidecar-linux-x64" \
+            "$RUNNER_TEMP/vocalarc-onnx-ort-core-linux-x64.so" \
+            "$RUNNER_TEMP/vocalarc-onnx-ort-cuda-linux-x64.so" \
+            "$RUNNER_TEMP/vocalarc-onnx-ort-shared-linux-x64.so"
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   windows:
-    name: Windows x64 native CPU
+    if: >-
+      (github.event_name == 'release' && startsWith(github.event.release.tag_name, 'vocalarc-onnx-v')) ||
+      (github.event_name == 'workflow_dispatch' && startsWith(inputs.release_tag, 'vocalarc-onnx-v'))
     runs-on: windows-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
-        with:
-          lfs: true
-      - name: Configure with MSVC CMake
-        run: cmake -S native -B native/build-cmake -A x64
-      - name: Build self-contained CPU sidecar
-        run: cmake --build native/build-cmake --config Release --target vocalarc-separation
-      - name: Test embedded model loading
+      - name: Download ONNX Runtime SDKs
         shell: pwsh
         run: |
-          $env:VOCALARC_NATIVE_MODEL = "$pwd\missing-model.f32"
-          $binary = "$pwd\native\build-cmake\Release\vocalarc-separation.exe"
-          @(
-            '{"id":1,"type":"ping"}'
-            '{"id":2,"type":"load"}'
-            '{"id":3,"type":"shutdown"}'
-          ) | & $binary --threads 1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Stage verified release asset
-        run: |
-          python native/scripts/package_release.py --cpu native/build-cmake/Release/vocalarc-separation.exe --model native/assets/model.f32 --target win32-x64 --output native/release/win32-x64
-      - name: Publish tagged Windows assets
-        if: startsWith(github.ref, 'refs/tags/vocalarc-native-v')
-        shell: pwsh
+          Invoke-WebRequest "https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime.DirectML/1.24.4" -OutFile "$env:RUNNER_TEMP/ort-dml.nupkg"
+          Expand-Archive "$env:RUNNER_TEMP/ort-dml.nupkg" "$env:RUNNER_TEMP/ort-dml"
         env:
           GH_TOKEN: ${{ github.token }}
+      - name: Build C++ sidecar
+        shell: pwsh
         run: |
-          gh release view $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY *> $null
-          if ($LASTEXITCODE -ne 0) {
-            gh release create $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --title $env:GITHUB_REF_NAME --generate-notes
-          }
-          Copy-Item native/release/win32-x64/vocalarc-native-manifest.json native/release/win32-x64/vocalarc-native-manifest-win32-x64.json
-          gh release upload $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --clobber native/release/win32-x64/vocalarc-native-win32-x64.exe native/release/win32-x64/vocalarc-native-manifest-win32-x64.json
+          $pkg = "$env:RUNNER_TEMP/ort-dml"
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/ort-sdk/include", "$env:RUNNER_TEMP/ort-sdk/lib" | Out-Null
+          Copy-Item "$pkg/build/native/include/*" "$env:RUNNER_TEMP/ort-sdk/include" -Force
+          Copy-Item "$pkg/runtimes/win-x64/native/onnxruntime.dll", "$pkg/runtimes/win-x64/native/onnxruntime.lib" "$env:RUNNER_TEMP/ort-sdk/lib" -Force
+          cmake -S onnx/native -B "$env:RUNNER_TEMP/build" -A x64 -DORT_ROOT="$env:RUNNER_TEMP/ort-sdk"
+          cmake --build "$env:RUNNER_TEMP/build" --config Release
+          Copy-Item "$env:RUNNER_TEMP/build/Release/vocalarc-onnx-sidecar.exe" "$env:RUNNER_TEMP/vocalarc-onnx-sidecar.exe"
+      - name: Download DirectML graph from this release
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.release.tag_name || inputs.release_tag }}"
+          gh release download $tag --repo $env:GITHUB_REPOSITORY --pattern vocalarc-onnx-model-directml-win32-x64.onnx --dir $env:RUNNER_TEMP
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Stage and upload Windows bundle
+        shell: pwsh
+        run: |
+          $ort = "$env:RUNNER_TEMP/ort-sdk"
+          $native = Get-ChildItem "$env:RUNNER_TEMP/ort-dml/runtimes/win-x64/native" -File
+          $shared = $native | Where-Object Name -eq "onnxruntime_providers_shared.dll"
+          python onnx/package_runtime.py --sidecar "$env:RUNNER_TEMP/vocalarc-onnx-sidecar.exe" --model "$env:RUNNER_TEMP/vocalarc-onnx-model-directml-win32-x64.onnx" --ort-root $ort --provider directml --provider-library $shared.FullName --target win32-x64 --release-version "${{ github.event.release.tag_name || inputs.release_tag }}" --output "$env:RUNNER_TEMP/bundle-win32-x64"
+          $tag = "${{ github.event.release.tag_name || inputs.release_tag }}"
+          $bundle = "$env:RUNNER_TEMP/bundle-win32-x64"
+          Copy-Item "$bundle/manifest.json" "$env:RUNNER_TEMP/vocalarc-onnx-manifest-win32-x64.json"
+          Copy-Item "$bundle/models/model.onnx" "$env:RUNNER_TEMP/vocalarc-onnx-model-directml-win32-x64.onnx"
+          Copy-Item "$bundle/runtime/vocalarc-onnx-sidecar.exe" "$env:RUNNER_TEMP/vocalarc-onnx-sidecar-win32-x64.exe"
+          Copy-Item "$bundle/runtime/onnxruntime.dll" "$env:RUNNER_TEMP/vocalarc-onnx-ort-core-win32-x64.dll"
+          Copy-Item "$bundle/runtime/onnxruntime_providers_shared.dll" "$env:RUNNER_TEMP/vocalarc-onnx-ort-shared-win32-x64.dll"
+          gh release upload $tag --repo $env:GITHUB_REPOSITORY --clobber "$env:RUNNER_TEMP/vocalarc-onnx-manifest-win32-x64.json" "$env:RUNNER_TEMP/vocalarc-onnx-model-directml-win32-x64.onnx" "$env:RUNNER_TEMP/vocalarc-onnx-sidecar-win32-x64.exe" "$env:RUNNER_TEMP/vocalarc-onnx-ort-core-win32-x64.dll" "$env:RUNNER_TEMP/vocalarc-onnx-ort-shared-win32-x64.dll"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  macos:
+    if: >-
+      (github.event_name == 'release' && startsWith(github.event.release.tag_name, 'vocalarc-onnx-v')) ||
+      (github.event_name == 'workflow_dispatch' && startsWith(inputs.release_tag, 'vocalarc-onnx-v'))
+    strategy:
+      matrix:
+        include:
+          - runner: macos-13
+            target: darwin-x64
+            sdk: source
+          - runner: macos-14
+            target: darwin-arm64
+            sdk: onnxruntime-osx-arm64-1.28.0.tgz
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download ONNX Runtime SDK
+        if: matrix.sdk != 'source'
+        run: |
+          gh release download v1.28.0 --repo microsoft/onnxruntime --pattern '${{ matrix.sdk }}' --dir "$RUNNER_TEMP"
+          tar -xzf "$RUNNER_TEMP/${{ matrix.sdk }}" -C "$RUNNER_TEMP"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Build ONNX Runtime with CoreML for Intel macOS
+        if: matrix.sdk == 'source'
+        run: |
+          git clone --depth 1 --branch v1.28.0 https://github.com/microsoft/onnxruntime.git "$RUNNER_TEMP/onnxruntime-source"
+          cd "$RUNNER_TEMP/onnxruntime-source"
+          ./build.sh --config Release --build_shared_lib --use_coreml --skip_tests --parallel 3 --cmake_extra_defines CMAKE_OSX_ARCHITECTURES=x86_64
+          mkdir -p "$RUNNER_TEMP/ort-sdk/include" "$RUNNER_TEMP/ort-sdk/lib"
+          cp -R include/* "$RUNNER_TEMP/ort-sdk/include/"
+          cp build/MacOS/Release/libonnxruntime*.dylib "$RUNNER_TEMP/ort-sdk/lib/"
+          ln -sf libonnxruntime.1.28.0.dylib "$RUNNER_TEMP/ort-sdk/lib/libonnxruntime.dylib"
+      - name: Build C++ sidecar
+        run: |
+          if [[ "${{ matrix.sdk }}" == "source" ]]; then ort="$RUNNER_TEMP/ort-sdk"; else ort="$RUNNER_TEMP/${{ matrix.sdk }}"; ort="${ort%.tgz}"; fi
+          cmake -S onnx/native -B "$RUNNER_TEMP/build" -DORT_ROOT="$ort"
+          cmake --build "$RUNNER_TEMP/build" --config Release
+          cp "$RUNNER_TEMP/build/vocalarc-onnx-sidecar" "$RUNNER_TEMP/vocalarc-onnx-sidecar"
+      - name: Download CoreML graph from this release
+        run: |
+          tag="${{ github.event.release.tag_name || inputs.release_tag }}"
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern vocalarc-onnx-model-coreml-${{ matrix.target }}.onnx --dir "$RUNNER_TEMP"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Stage and upload macOS bundle
+        run: |
+          if [[ "${{ matrix.sdk }}" == "source" ]]; then ort="$RUNNER_TEMP/ort-sdk"; else ort="$RUNNER_TEMP/${{ matrix.sdk }}"; ort="${ort%.tgz}"; fi
+          python3 onnx/package_runtime.py --sidecar "$RUNNER_TEMP/vocalarc-onnx-sidecar" --model "$RUNNER_TEMP/vocalarc-onnx-model-coreml-${{ matrix.target }}.onnx" --ort-root "$ort" --provider coreml --target '${{ matrix.target }}' --release-version "${{ github.event.release.tag_name || inputs.release_tag }}" --output "$RUNNER_TEMP/bundle-${{ matrix.target }}"
+          tag="${{ github.event.release.tag_name || inputs.release_tag }}"; bundle="$RUNNER_TEMP/bundle-${{ matrix.target }}"
+          cp "$bundle/manifest.json" "$RUNNER_TEMP/vocalarc-onnx-manifest-${{ matrix.target }}.json"
+          cp "$bundle/models/model.onnx" "$RUNNER_TEMP/vocalarc-onnx-model-coreml-${{ matrix.target }}.onnx"
+          cp "$bundle/runtime/vocalarc-onnx-sidecar" "$RUNNER_TEMP/vocalarc-onnx-sidecar-${{ matrix.target }}"
+          cp "$bundle/runtime/libonnxruntime.dylib" "$RUNNER_TEMP/vocalarc-onnx-ort-core-${{ matrix.target }}.dylib"
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber "$RUNNER_TEMP/vocalarc-onnx-manifest-${{ matrix.target }}.json" "$RUNNER_TEMP/vocalarc-onnx-model-coreml-${{ matrix.target }}.onnx" "$RUNNER_TEMP/vocalarc-onnx-sidecar-${{ matrix.target }}" "$RUNNER_TEMP/vocalarc-onnx-ort-core-${{ matrix.target }}.dylib"
+        env:
+          GH_TOKEN: ${{ github.token }}

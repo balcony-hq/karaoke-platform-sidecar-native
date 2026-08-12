@@ -1,0 +1,5 @@
+numpy>=2.0
+onnx>=1.22
+onnxruntime-gpu>=1.28
+soundfile>=0.14
+torch>=2.6

@@ -154,7 +154,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - runner: macos-13
+          - runner: macos-14
             target: darwin-x64
             sdk: source
             architecture: x86_64

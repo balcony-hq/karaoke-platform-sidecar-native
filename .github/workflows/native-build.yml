@@ -159,7 +159,7 @@ jobs:
             sdk: source
           - runner: macos-14
             target: darwin-arm64
-            sdk: onnxruntime-osx-arm64-1.28.0.tgz
+            sdk: source
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4

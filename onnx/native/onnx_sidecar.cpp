@@ -632,7 +632,12 @@ class Separator {
 #elif defined(__APPLE__)
       try { append_named("CoreML", "CoreMLExecutionProvider"); return; } catch (...) { last = std::current_exception(); }
 #endif
-      try { append_tensorrt(); return; } catch (...) { last = std::current_exception(); }
+      const bool has_tensorrt = !options_.bundle_root.empty() &&
+          (fs::exists(options_.bundle_root / "runtime" / "libonnxruntime_providers_tensorrt.so") ||
+           fs::exists(options_.bundle_root / "runtime" / "onnxruntime_providers_tensorrt.dll"));
+      if (has_tensorrt) {
+        try { append_tensorrt(); return; } catch (...) { last = std::current_exception(); }
+      }
       try { append_cuda(); return; } catch (...) { last = std::current_exception(); }
       try { append_named("OpenVINO", "OpenVINOExecutionProvider"); return; } catch (...) { last = std::current_exception(); }
     }

@@ -157,9 +157,11 @@ jobs:
           - runner: macos-13
             target: darwin-x64
             sdk: source
+            architecture: x86_64
           - runner: macos-14
             target: darwin-arm64
             sdk: source
+            architecture: arm64
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -175,7 +177,7 @@ jobs:
         run: |
           git clone --depth 1 --branch v1.28.0 https://github.com/microsoft/onnxruntime.git "$RUNNER_TEMP/onnxruntime-source"
           cd "$RUNNER_TEMP/onnxruntime-source"
-          ./build.sh --config Release --build_shared_lib --use_coreml --skip_tests --parallel 3 --cmake_extra_defines CMAKE_OSX_ARCHITECTURES=x86_64
+          ./build.sh --config Release --build_shared_lib --use_coreml --skip_tests --parallel 3 --cmake_extra_defines CMAKE_OSX_ARCHITECTURES=${{ matrix.architecture }} CMAKE_POLICY_VERSION_MINIMUM=3.5
           mkdir -p "$RUNNER_TEMP/ort-sdk/include" "$RUNNER_TEMP/ort-sdk/lib"
           cp -R include/* "$RUNNER_TEMP/ort-sdk/include/"
           cp build/MacOS/Release/libonnxruntime*.dylib "$RUNNER_TEMP/ort-sdk/lib/"

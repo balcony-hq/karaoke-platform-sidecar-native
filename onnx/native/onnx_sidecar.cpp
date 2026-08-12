@@ -5,6 +5,10 @@
 // owns model execution and provider selection. The Python implementation in
 // ../ is the reference implementation used for export and parity tests.
 
+#if defined(_WIN32) && !defined(NOMINMAX)
+#define NOMINMAX
+#endif
+
 #include <onnxruntime_cxx_api.h>
 
 #if defined(_WIN32) && __has_include(<dml_provider_factory.h>)

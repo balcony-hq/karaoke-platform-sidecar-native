@@ -157,10 +157,12 @@ jobs:
           - runner: macos-14
             target: darwin-x64
             sdk: onnxruntime-osx-x86_64-1.20.1.tgz
+            ortRelease: v1.20.1
             architecture: x86_64
           - runner: macos-14
             target: darwin-arm64
             sdk: onnxruntime-osx-arm64-1.28.0.tgz
+            ortRelease: v1.28.0
             architecture: arm64
     runs-on: ${{ matrix.runner }}
     steps:
@@ -168,7 +170,7 @@ jobs:
       - name: Download ONNX Runtime SDK
         if: matrix.sdk != 'source'
         run: |
-          gh release download v1.28.0 --repo microsoft/onnxruntime --pattern '${{ matrix.sdk }}' --dir "$RUNNER_TEMP"
+          gh release download '${{ matrix.ortRelease }}' --repo microsoft/onnxruntime --pattern '${{ matrix.sdk }}' --dir "$RUNNER_TEMP"
           tar -xzf "$RUNNER_TEMP/${{ matrix.sdk }}" -C "$RUNNER_TEMP"
         env:
           GH_TOKEN: ${{ github.token }}

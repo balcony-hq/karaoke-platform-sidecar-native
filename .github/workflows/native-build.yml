@@ -187,7 +187,7 @@ jobs:
       - name: Build C++ sidecar
         run: |
           if [[ "${{ matrix.sdk }}" == "source" ]]; then ort="$RUNNER_TEMP/ort-sdk"; else ort="$RUNNER_TEMP/${{ matrix.sdk }}"; ort="${ort%.tgz}"; fi
-          cmake -S onnx/native -B "$RUNNER_TEMP/build" -DORT_ROOT="$ort"
+          cmake -S onnx/native -B "$RUNNER_TEMP/build" -DORT_ROOT="$ort" -DCMAKE_OSX_ARCHITECTURES=${{ matrix.architecture }}
           cmake --build "$RUNNER_TEMP/build" --config Release
           cp "$RUNNER_TEMP/build/vocalarc-onnx-sidecar" "$RUNNER_TEMP/vocalarc-onnx-sidecar"
       - name: Download CoreML graph from this release

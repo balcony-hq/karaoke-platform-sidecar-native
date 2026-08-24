@@ -193,9 +193,27 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Windows CUDA bundle packaging failed" }
           $bundle = "$env:RUNNER_TEMP/bundle-win32-x64"
           $env:PATH = "$bundle\runtime;$env:PATH"
-          @('{"id":1,"type":"ping"}', '{"id":2,"type":"shutdown"}') | `
-            & "$bundle\runtime\vocalarc-onnx-sidecar.exe" --model "$bundle\models\model.onnx" --provider cpu
-          if ($LASTEXITCODE -ne 0) { throw "Windows CUDA bundle smoke test failed" }
+          $process = New-Object System.Diagnostics.Process
+          $process.StartInfo.FileName = Join-Path $bundle "runtime\vocalarc-onnx-sidecar.exe"
+          $model = Join-Path $bundle "models\model.onnx"
+          $process.StartInfo.Arguments = "--model `"$model`" --provider cpu"
+          $process.StartInfo.WorkingDirectory = $bundle
+          $process.StartInfo.UseShellExecute = $false
+          $process.StartInfo.RedirectStandardInput = $true
+          $process.StartInfo.RedirectStandardOutput = $true
+          $process.StartInfo.RedirectStandardError = $true
+          if (-not $process.Start()) { throw "Windows CUDA sidecar did not start" }
+          $process.StandardInput.WriteLine('{"id":1,"type":"ping"}')
+          $process.StandardInput.WriteLine('{"id":2,"type":"shutdown"}')
+          $process.StandardInput.Close()
+          $stdout = $process.StandardOutput.ReadToEnd()
+          $stderr = $process.StandardError.ReadToEnd()
+          $process.WaitForExit()
+          Write-Host $stdout
+          if ($stderr) { Write-Host $stderr }
+          if ($process.ExitCode -ne 0) { throw "Windows CUDA bundle smoke test failed: exit $($process.ExitCode)" }
+          if ($stdout -notmatch '"type":"pong"') { throw "Windows CUDA bundle did not return pong" }
+          $process.Dispose()
           $dumpbin = Get-ChildItem "$env:VS_INSTALL_ROOT\VC\Tools\MSVC" -Recurse -File -Filter dumpbin.exe | Select-Object -First 1
           if (-not $dumpbin) { throw "dumpbin.exe was not found" }
           & $dumpbin.FullName /DEPENDENTS "$bundle\runtime\vocalarc-onnx-sidecar.exe"

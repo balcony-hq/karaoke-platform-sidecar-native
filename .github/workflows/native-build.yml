@@ -172,8 +172,9 @@ jobs:
         shell: pwsh
         run: |
           $ort = "$env:RUNNER_TEMP\onnxruntime-win-x64-gpu_cuda12-1.28.0"
-          $redistVersion = Get-ChildItem "$env:VS_INSTALL_ROOT\VC\Redist\MSVC" -Directory | Sort-Object Name -Descending | Select-Object -First 1
-          $redist = Join-Path $redistVersion.FullName "x64\Microsoft.VC143.CRT"
+          $redistDll = Get-ChildItem "$env:VS_INSTALL_ROOT\VC\Redist\MSVC" -Recurse -File -Filter MSVCP140.dll | Select-Object -First 1
+          if (-not $redistDll) { throw "MSVC redistributable was not found" }
+          $redist = $redistDll.Directory.FullName
           python onnx/package_runtime.py `
             --sidecar "$env:RUNNER_TEMP/vocalarc-onnx-sidecar.exe" `
             --model "$env:RUNNER_TEMP/vocalarc-onnx-model-cuda-linux-x64.onnx" `
@@ -188,13 +189,16 @@ jobs:
             --dependency "$redist\MSVCP140_1.dll" `
             --dependency "$redist\VCRUNTIME140.dll" `
             --dependency "$redist\VCRUNTIME140_1.dll"
+          if ($LASTEXITCODE -ne 0) { throw "Windows CUDA bundle packaging failed" }
           $bundle = "$env:RUNNER_TEMP/bundle-win32-x64"
           $env:PATH = "$bundle\runtime;$env:PATH"
           @('{"id":1,"type":"ping"}', '{"id":2,"type":"shutdown"}') | `
             & "$bundle\runtime\vocalarc-onnx-sidecar.exe" --model "$bundle\models\model.onnx" --provider cpu
           if ($LASTEXITCODE -ne 0) { throw "Windows CUDA bundle smoke test failed" }
-          dumpbin /DEPENDENTS "$bundle\runtime\vocalarc-onnx-sidecar.exe"
-          dumpbin /DEPENDENTS "$bundle\runtime\onnxruntime_providers_cuda.dll"
+          $dumpbin = Get-ChildItem "$env:VS_INSTALL_ROOT\VC\Tools\MSVC" -Recurse -File -Filter dumpbin.exe | Select-Object -First 1
+          if (-not $dumpbin) { throw "dumpbin.exe was not found" }
+          & $dumpbin.FullName /DEPENDENTS "$bundle\runtime\vocalarc-onnx-sidecar.exe"
+          & $dumpbin.FullName /DEPENDENTS "$bundle\runtime\onnxruntime_providers_cuda.dll"
       - name: Upload Windows CUDA release assets
         shell: pwsh
         run: |

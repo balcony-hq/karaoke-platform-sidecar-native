@@ -31,6 +31,19 @@ PROVIDER_LIBS = {
     "openvino": ["libonnxruntime_providers_openvino.so", "libonnxruntime_providers_shared.so"],
 }
 
+WINDOWS_PROVIDER_LIBS = {
+    "cpu": [],
+    "cuda": ["onnxruntime_providers_cuda.dll", "onnxruntime_providers_shared.dll"],
+    "tensorrt": [
+        "onnxruntime_providers_tensorrt.dll",
+        "onnxruntime_providers_cuda.dll",
+        "onnxruntime_providers_shared.dll",
+    ],
+    "directml": ["onnxruntime_providers_shared.dll"],
+    "coreml": [],
+    "openvino": ["onnxruntime_providers_openvino.dll", "onnxruntime_providers_shared.dll"],
+}
+
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -88,7 +101,12 @@ def main() -> None:
 
     provider_sources = list(options.provider_library)
     if not provider_sources:
-        provider_sources = [ort_lib / name for name in PROVIDER_LIBS[options.provider]]
+        provider_names = (
+            WINDOWS_PROVIDER_LIBS[options.provider]
+            if options.target.startswith("win32-")
+            else PROVIDER_LIBS[options.provider]
+        )
+        provider_sources = [ort_lib / name for name in provider_names]
     for source in provider_sources:
         source = source.resolve()
         if source.exists():

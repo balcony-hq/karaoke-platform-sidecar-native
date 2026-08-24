@@ -1,0 +1,116 @@
+{
+  "schemaVersion": 1,
+  "environment": {
+    "os": "native Linux x86_64",
+    "gpu": "NVIDIA GeForce RTX 5080",
+    "driver": "595.71.05",
+    "sidecarCudaToolkit": "12.8.93",
+    "onnxRuntime": "1.28.0 CUDA 12",
+    "torch": "2.13.0+cu130"
+  },
+  "input": {
+    "path": null,
+    "generatedBy": "onnx.benchmark._input",
+    "seconds": 19.99,
+    "samples": 881559,
+    "sampleRate": 44100,
+    "channels": 2
+  },
+  "settings": {
+    "bigshifts": 2,
+    "tta": true,
+    "warmups": 1,
+    "repeats": 3,
+    "threads": 1,
+    "productionDefaults": true
+  },
+  "model": {
+    "precision": "fp16",
+    "inputPrecision": "fp32",
+    "opset": 24,
+    "modelSha256": "aed685874a9f9906c2e6da2341297e9f1a765ad41a7bdd171a6179bf8b75dc25"
+  },
+  "torch": {
+    "device": "cuda:0",
+    "precision": "cuda_amp",
+    "attention": "flash",
+    "torchVersion": "2.13.0+cu130",
+    "cudaAvailable": true,
+    "cudaDevice": "NVIDIA GeForce RTX 5080",
+    "timingsSeconds": [
+      14.756435895999857,
+      14.773124306000682,
+      14.772823276000054
+    ],
+    "medianSeconds": 14.772823276000054,
+    "realTimeFactor": 1.3531604370083934
+  },
+  "native": {
+    "persistent": true,
+    "startupSeconds": 0.6039673680006672,
+    "requests": 5,
+    "separations": 4,
+    "ping": {
+      "ok": true,
+      "type": "pong",
+      "runtime": "vocalarc-onnx-cpp",
+      "provider": "CUDAExecutionProvider",
+      "dtype": "fp16",
+      "cudaDsp": true,
+      "cudaGraph": false,
+      "supports": {
+        "bigshifts": true,
+        "tta": true,
+        "cpu": true
+      }
+    },
+    "providerRequested": "cuda",
+    "cudaSynchronization": "torch.cuda.synchronize",
+    "timingDefinition": "C++ profile.elapsedSeconds; excludes WAV I/O and process startup",
+    "timingsSeconds": [
+      14.6914298,
+      14.6699664,
+      14.6756064
+    ],
+    "medianSeconds": 14.6756064,
+    "realTimeFactor": 1.362124293548783,
+    "speedupOverPyTorch": 1.0066243856199397,
+    "requestWallTimingsSeconds": [
+      14.739188397000362,
+      14.717842450999342,
+      14.723341323000568
+    ],
+    "requestWallMedianSeconds": 14.723341323000568,
+    "requestWallRealTimeFactor": 1.3577081153971442,
+    "requestWallSpeedupOverPyTorch": 1.0033607828490796
+  },
+  "parity": {
+    "maxAbs": 2.1314190234988928e-7,
+    "meanAbs": 1.502131298494064e-8,
+    "rmse": 2.1281008718247265e-8,
+    "relativeRmse": 0.0010596923777368827,
+    "correlation": 0.9999994578692498,
+    "referenceRms": 2.0082251382892606e-5,
+    "estimateRms": 2.007826188885994e-5,
+    "passed": true,
+    "checks": {
+      "maxAbs": true,
+      "rmse": true,
+      "relativeRmse": true,
+      "correlation": true
+    },
+    "correlationError": 5.421307501807249e-7,
+    "tolerances": {
+      "maxAbs": 5e-6,
+      "rmse": 1e-6,
+      "relativeRmse": 0.003,
+      "correlationDeficit": 1e-5
+    }
+  },
+  "acceptance": {
+    "passed": true,
+    "parityPassed": true,
+    "speedPassed": true,
+    "minimumSpeedup": 1.0
+  }
+}

@@ -22,9 +22,17 @@ jobs:
     if: >-
       (github.event_name == 'release' && startsWith(github.event.release.tag_name, 'vocalarc-onnx-v')) ||
       (github.event_name == 'workflow_dispatch' && startsWith(inputs.release_tag, 'vocalarc-onnx-v'))
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Install CUDA 12.8 compiler and cuFFT SDK
+        run: |
+          curl -fsSLo "$RUNNER_TEMP/cuda-keyring.deb" \
+            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i "$RUNNER_TEMP/cuda-keyring.deb"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cuda-nvcc-12-8 cuda-cudart-dev-12-8 libcufft-dev-12-8
       - name: Download ONNX Runtime GPU SDK
         run: |
           gh release download v1.28.0 --repo microsoft/onnxruntime \
@@ -35,10 +43,15 @@ jobs:
       - name: Build C++ sidecar
         run: |
           ort="$RUNNER_TEMP/onnxruntime-linux-x64-gpu_cuda12-1.28.0"
-          g++ -std=c++17 -O3 -Wall -Wextra -Wpedantic \
-            -I"$ort/include" onnx/native/onnx_sidecar.cpp \
-            -L"$ort/lib" -Wl,-rpath,'$ORIGIN' -lonnxruntime \
-            -o "$RUNNER_TEMP/vocalarc-onnx-sidecar"
+          cmake -S onnx/native -B "$RUNNER_TEMP/build-linux" \
+            -DORT_ROOT="$ort" \
+            -DVOCALARC_ENABLE_CUDA_DSP=ON \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCUDAToolkit_ROOT=/usr/local/cuda-12.8 \
+            -DCMAKE_CUDA_ARCHITECTURES='60;70;75;80;86;89;90;100;120' \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$RUNNER_TEMP/build-linux" --parallel
+          cp "$RUNNER_TEMP/build-linux/vocalarc-onnx-sidecar" "$RUNNER_TEMP/vocalarc-onnx-sidecar"
       - name: Download CUDA graph from this release
         run: |
           tag="${{ github.event.release.tag_name || inputs.release_tag }}"
@@ -55,7 +68,10 @@ jobs:
       - name: Stage CUDA user-space dependencies
         run: |
           python3 -m pip install --target "$RUNNER_TEMP/cuda-libs" \
-            nvidia-cublas-cu12==12.8.4.1 nvidia-cuda-runtime-cu12==12.8.90 nvidia-curand-cu12==10.3.9.90
+            nvidia-cublas-cu12==12.8.4.1 \
+            nvidia-cuda-runtime-cu12==12.8.90 \
+            nvidia-curand-cu12==10.3.9.90 \
+            nvidia-cufft-cu12==11.3.3.83
       - name: Stage and validate bundle
         run: |
           ort="$RUNNER_TEMP/onnxruntime-linux-x64-gpu_cuda12-1.28.0"
@@ -68,7 +84,8 @@ jobs:
             --dependency "$RUNNER_TEMP/cuda-libs/nvidia/cublas/lib/libcublasLt.so.12" \
             --dependency "$RUNNER_TEMP/cuda-libs/nvidia/cublas/lib/libcublas.so.12" \
             --dependency "$RUNNER_TEMP/cuda-libs/nvidia/curand/lib/libcurand.so.10" \
-            --dependency "$RUNNER_TEMP/cuda-libs/nvidia/cuda_runtime/lib/libcudart.so.12"
+            --dependency "$RUNNER_TEMP/cuda-libs/nvidia/cuda_runtime/lib/libcudart.so.12" \
+            --dependency "$RUNNER_TEMP/cuda-libs/nvidia/cufft/lib/libcufft.so.11"
           test "$(stat -c%s "$RUNNER_TEMP/bundle-linux-x64/models/model.onnx")" -lt $((2 * 1024 * 1024 * 1024))
       - name: Upload Linux release assets
         run: |
@@ -84,6 +101,7 @@ jobs:
           cp "$bundle/runtime/libcublas.so.12" "$RUNNER_TEMP/vocalarc-onnx-cuda-cublas-linux-x64.so"
           cp "$bundle/runtime/libcurand.so.10" "$RUNNER_TEMP/vocalarc-onnx-cuda-curand-linux-x64.so"
           cp "$bundle/runtime/libcudart.so.12" "$RUNNER_TEMP/vocalarc-onnx-cuda-cudart-linux-x64.so"
+          cp "$bundle/runtime/libcufft.so.11" "$RUNNER_TEMP/vocalarc-onnx-cuda-cufft-linux-x64.so"
           gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber \
             "$RUNNER_TEMP/vocalarc-onnx-manifest-linux-x64.json" \
             "$RUNNER_TEMP/vocalarc-onnx-model-cuda-linux-x64.onnx" \
@@ -94,34 +112,148 @@ jobs:
             "$RUNNER_TEMP/vocalarc-onnx-cuda-cublasLt-linux-x64.so" \
             "$RUNNER_TEMP/vocalarc-onnx-cuda-cublas-linux-x64.so" \
             "$RUNNER_TEMP/vocalarc-onnx-cuda-curand-linux-x64.so" \
-            "$RUNNER_TEMP/vocalarc-onnx-cuda-cudart-linux-x64.so"
+            "$RUNNER_TEMP/vocalarc-onnx-cuda-cudart-linux-x64.so" \
+            "$RUNNER_TEMP/vocalarc-onnx-cuda-cufft-linux-x64.so"
         env:
           GH_TOKEN: ${{ github.token }}
 
-  windows:
+  windows_cuda:
     if: >-
       (github.event_name == 'release' && startsWith(github.event.release.tag_name, 'vocalarc-onnx-v')) ||
       (github.event_name == 'workflow_dispatch' && startsWith(inputs.release_tag, 'vocalarc-onnx-v'))
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Download ONNX Runtime SDKs
+      - name: Download ONNX Runtime CUDA 12 SDK
+        shell: pwsh
+        run: |
+          gh release download v1.28.0 --repo microsoft/onnxruntime --pattern onnxruntime-win-x64-gpu_cuda12-1.28.0.zip --dir $env:RUNNER_TEMP
+          Expand-Archive "$env:RUNNER_TEMP/onnxruntime-win-x64-gpu_cuda12-1.28.0.zip" $env:RUNNER_TEMP
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Install CUDA 12.8 compiler and runtime libraries
+        shell: pwsh
+        run: |
+          $conda = @("$env:CONDA\Scripts\conda.exe", "C:\Miniconda\Scripts\conda.exe") |
+            Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $conda) { throw "Miniconda was not found on the GitHub runner" }
+          & $conda create --yes --prefix "$env:RUNNER_TEMP/cuda-12.8" --override-channels `
+            --channel nvidia --channel conda-forge `
+            cuda-nvcc=12.8.93 cuda-cudart-dev=12.8.90 `
+            libcublas-dev=12.8.4.1 libcufft-dev=11.3.3.83
+          if ($LASTEXITCODE -ne 0) { throw "CUDA conda environment creation failed" }
+          "CUDA_ROOT=$env:RUNNER_TEMP\cuda-12.8\Library" | Out-File $env:GITHUB_ENV -Append
+      - name: Build CUDA C++ sidecar
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments "-arch=x64 -host_arch=x64"
+          $ort = "$env:RUNNER_TEMP\onnxruntime-win-x64-gpu_cuda12-1.28.0"
+          cmake -S onnx/native -B "$env:RUNNER_TEMP/build-cuda" -G Ninja `
+            -DORT_ROOT="$ort" `
+            -DVOCALARC_ENABLE_CUDA_DSP=ON `
+            -DCMAKE_CUDA_COMPILER="$env:CUDA_ROOT\bin\nvcc.exe" `
+            -DCUDAToolkit_ROOT="$env:CUDA_ROOT" `
+            -DCMAKE_CUDA_ARCHITECTURES="60;70;75;80;86;89;90;100;120" `
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$env:RUNNER_TEMP/build-cuda" --parallel
+          Copy-Item "$env:RUNNER_TEMP/build-cuda/vocalarc-onnx-sidecar.exe" "$env:RUNNER_TEMP/vocalarc-onnx-sidecar.exe"
+          "VS_INSTALL_ROOT=$vs" | Out-File $env:GITHUB_ENV -Append
+      - name: Download CUDA graph from this release
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.release.tag_name || inputs.release_tag }}"
+          gh release download $tag --repo $env:GITHUB_REPOSITORY --pattern vocalarc-onnx-model-cuda-linux-x64.onnx --dir $env:RUNNER_TEMP
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Stage and smoke-test Windows CUDA bundle
+        shell: pwsh
+        run: |
+          $ort = "$env:RUNNER_TEMP\onnxruntime-win-x64-gpu_cuda12-1.28.0"
+          $redistVersion = Get-ChildItem "$env:VS_INSTALL_ROOT\VC\Redist\MSVC" -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          $redist = Join-Path $redistVersion.FullName "x64\Microsoft.VC143.CRT"
+          python onnx/package_runtime.py `
+            --sidecar "$env:RUNNER_TEMP/vocalarc-onnx-sidecar.exe" `
+            --model "$env:RUNNER_TEMP/vocalarc-onnx-model-cuda-linux-x64.onnx" `
+            --ort-root $ort --provider cuda --target win32-x64 `
+            --release-version "${{ github.event.release.tag_name || inputs.release_tag }}" `
+            --output "$env:RUNNER_TEMP/bundle-win32-x64" `
+            --dependency "$env:CUDA_ROOT\bin\cublasLt64_12.dll" `
+            --dependency "$env:CUDA_ROOT\bin\cublas64_12.dll" `
+            --dependency "$env:CUDA_ROOT\bin\cudart64_12.dll" `
+            --dependency "$env:CUDA_ROOT\bin\cufft64_11.dll" `
+            --dependency "$redist\MSVCP140.dll" `
+            --dependency "$redist\MSVCP140_1.dll" `
+            --dependency "$redist\VCRUNTIME140.dll" `
+            --dependency "$redist\VCRUNTIME140_1.dll"
+          $bundle = "$env:RUNNER_TEMP/bundle-win32-x64"
+          $env:PATH = "$bundle\runtime;$env:PATH"
+          @('{"id":1,"type":"ping"}', '{"id":2,"type":"shutdown"}') | `
+            & "$bundle\runtime\vocalarc-onnx-sidecar.exe" --model "$bundle\models\model.onnx" --provider cpu
+          if ($LASTEXITCODE -ne 0) { throw "Windows CUDA bundle smoke test failed" }
+          dumpbin /DEPENDENTS "$bundle\runtime\vocalarc-onnx-sidecar.exe"
+          dumpbin /DEPENDENTS "$bundle\runtime\onnxruntime_providers_cuda.dll"
+      - name: Upload Windows CUDA release assets
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.release.tag_name || inputs.release_tag }}"
+          $bundle = "$env:RUNNER_TEMP/bundle-win32-x64"
+          Copy-Item "$bundle/manifest.json" "$env:RUNNER_TEMP/vocalarc-onnx-manifest-win32-x64.json"
+          Copy-Item "$bundle/models/model.onnx" "$env:RUNNER_TEMP/vocalarc-onnx-model-cuda-win32-x64.onnx"
+          Copy-Item "$bundle/runtime/vocalarc-onnx-sidecar.exe" "$env:RUNNER_TEMP/vocalarc-onnx-sidecar-win32-x64.exe"
+          Copy-Item "$bundle/runtime/onnxruntime.dll" "$env:RUNNER_TEMP/vocalarc-onnx-ort-core-win32-x64.dll"
+          Copy-Item "$bundle/runtime/onnxruntime_providers_cuda.dll" "$env:RUNNER_TEMP/vocalarc-onnx-ort-cuda-win32-x64.dll"
+          Copy-Item "$bundle/runtime/onnxruntime_providers_shared.dll" "$env:RUNNER_TEMP/vocalarc-onnx-ort-shared-win32-x64.dll"
+          Copy-Item "$bundle/runtime/cublasLt64_12.dll" "$env:RUNNER_TEMP/vocalarc-onnx-cuda-cublasLt-win32-x64.dll"
+          Copy-Item "$bundle/runtime/cublas64_12.dll" "$env:RUNNER_TEMP/vocalarc-onnx-cuda-cublas-win32-x64.dll"
+          Copy-Item "$bundle/runtime/cudart64_12.dll" "$env:RUNNER_TEMP/vocalarc-onnx-cuda-cudart-win32-x64.dll"
+          Copy-Item "$bundle/runtime/cufft64_11.dll" "$env:RUNNER_TEMP/vocalarc-onnx-cuda-cufft-win32-x64.dll"
+          Copy-Item "$bundle/runtime/MSVCP140.dll" "$env:RUNNER_TEMP/vocalarc-onnx-vc-msvcp140-win32-x64.dll"
+          Copy-Item "$bundle/runtime/MSVCP140_1.dll" "$env:RUNNER_TEMP/vocalarc-onnx-vc-msvcp140-1-win32-x64.dll"
+          Copy-Item "$bundle/runtime/VCRUNTIME140.dll" "$env:RUNNER_TEMP/vocalarc-onnx-vc-vcruntime140-win32-x64.dll"
+          Copy-Item "$bundle/runtime/VCRUNTIME140_1.dll" "$env:RUNNER_TEMP/vocalarc-onnx-vc-vcruntime140-1-win32-x64.dll"
+          gh release upload $tag --repo $env:GITHUB_REPOSITORY --clobber `
+            "$env:RUNNER_TEMP/vocalarc-onnx-manifest-win32-x64.json" `
+            "$env:RUNNER_TEMP/vocalarc-onnx-model-cuda-win32-x64.onnx" `
+            "$env:RUNNER_TEMP/vocalarc-onnx-sidecar-win32-x64.exe" `
+            "$env:RUNNER_TEMP/vocalarc-onnx-ort-core-win32-x64.dll" `
+            "$env:RUNNER_TEMP/vocalarc-onnx-ort-cuda-win32-x64.dll" `
+            "$env:RUNNER_TEMP/vocalarc-onnx-ort-shared-win32-x64.dll" `
+            "$env:RUNNER_TEMP/vocalarc-onnx-cuda-cublasLt-win32-x64.dll" `
+            "$env:RUNNER_TEMP/vocalarc-onnx-cuda-cublas-win32-x64.dll" `
+            "$env:RUNNER_TEMP/vocalarc-onnx-cuda-cudart-win32-x64.dll" `
+            "$env:RUNNER_TEMP/vocalarc-onnx-cuda-cufft-win32-x64.dll" `
+            "$env:RUNNER_TEMP/vocalarc-onnx-vc-msvcp140-win32-x64.dll" `
+            "$env:RUNNER_TEMP/vocalarc-onnx-vc-msvcp140-1-win32-x64.dll" `
+            "$env:RUNNER_TEMP/vocalarc-onnx-vc-vcruntime140-win32-x64.dll" `
+            "$env:RUNNER_TEMP/vocalarc-onnx-vc-vcruntime140-1-win32-x64.dll"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  windows_directml:
+    if: >-
+      (github.event_name == 'release' && startsWith(github.event.release.tag_name, 'vocalarc-onnx-v')) ||
+      (github.event_name == 'workflow_dispatch' && startsWith(inputs.release_tag, 'vocalarc-onnx-v'))
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download ONNX Runtime DirectML SDK
         shell: pwsh
         run: |
           Invoke-WebRequest "https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime.DirectML/1.24.4" -OutFile "$env:RUNNER_TEMP/ort-dml.nupkg"
           Expand-Archive "$env:RUNNER_TEMP/ort-dml.nupkg" "$env:RUNNER_TEMP/ort-dml"
-        env:
-          GH_TOKEN: ${{ github.token }}
-      - name: Build C++ sidecar
+      - name: Build DirectML C++ sidecar
         shell: pwsh
         run: |
           $pkg = "$env:RUNNER_TEMP/ort-dml"
           New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/ort-sdk/include", "$env:RUNNER_TEMP/ort-sdk/lib" | Out-Null
           Copy-Item "$pkg/build/native/include/*" "$env:RUNNER_TEMP/ort-sdk/include" -Force
           Copy-Item "$pkg/runtimes/win-x64/native/onnxruntime.dll", "$pkg/runtimes/win-x64/native/onnxruntime.lib" "$env:RUNNER_TEMP/ort-sdk/lib" -Force
-          cmake -S onnx/native -B "$env:RUNNER_TEMP/build" -A x64 -DORT_ROOT="$env:RUNNER_TEMP/ort-sdk"
-          cmake --build "$env:RUNNER_TEMP/build" --config Release
-          Copy-Item "$env:RUNNER_TEMP/build/Release/vocalarc-onnx-sidecar.exe" "$env:RUNNER_TEMP/vocalarc-onnx-sidecar.exe"
+          cmake -S onnx/native -B "$env:RUNNER_TEMP/build-dml" -A x64 -DORT_ROOT="$env:RUNNER_TEMP/ort-sdk" -DVOCALARC_ENABLE_CUDA_DSP=OFF
+          cmake --build "$env:RUNNER_TEMP/build-dml" --config Release
+          Copy-Item "$env:RUNNER_TEMP/build-dml/Release/vocalarc-onnx-sidecar.exe" "$env:RUNNER_TEMP/vocalarc-onnx-sidecar.exe"
       - name: Download DirectML graph from this release
         shell: pwsh
         run: |
@@ -129,21 +261,24 @@ jobs:
           gh release download $tag --repo $env:GITHUB_REPOSITORY --pattern vocalarc-onnx-model-directml-win32-x64.onnx --dir $env:RUNNER_TEMP
         env:
           GH_TOKEN: ${{ github.token }}
-      - name: Stage and upload Windows bundle
+      - name: Stage and upload DirectML fallback bundle
         shell: pwsh
         run: |
           $ort = "$env:RUNNER_TEMP/ort-sdk"
           $native = Get-ChildItem "$env:RUNNER_TEMP/ort-dml/runtimes/win-x64/native" -File
           $shared = $native | Where-Object Name -eq "onnxruntime_providers_shared.dll"
-          python onnx/package_runtime.py --sidecar "$env:RUNNER_TEMP/vocalarc-onnx-sidecar.exe" --model "$env:RUNNER_TEMP/vocalarc-onnx-model-directml-win32-x64.onnx" --ort-root $ort --provider directml --provider-library $shared.FullName --target win32-x64 --release-version "${{ github.event.release.tag_name || inputs.release_tag }}" --output "$env:RUNNER_TEMP/bundle-win32-x64"
+          python onnx/package_runtime.py --sidecar "$env:RUNNER_TEMP/vocalarc-onnx-sidecar.exe" --model "$env:RUNNER_TEMP/vocalarc-onnx-model-directml-win32-x64.onnx" --ort-root $ort --provider directml --provider-library $shared.FullName --target win32-x64-directml --release-version "${{ github.event.release.tag_name || inputs.release_tag }}" --output "$env:RUNNER_TEMP/bundle-win32-x64-directml"
           $tag = "${{ github.event.release.tag_name || inputs.release_tag }}"
-          $bundle = "$env:RUNNER_TEMP/bundle-win32-x64"
-          Copy-Item "$bundle/manifest.json" "$env:RUNNER_TEMP/vocalarc-onnx-manifest-win32-x64.json"
-          Copy-Item "$bundle/models/model.onnx" "$env:RUNNER_TEMP/vocalarc-onnx-model-directml-win32-x64.onnx"
-          Copy-Item "$bundle/runtime/vocalarc-onnx-sidecar.exe" "$env:RUNNER_TEMP/vocalarc-onnx-sidecar-win32-x64.exe"
-          Copy-Item "$bundle/runtime/onnxruntime.dll" "$env:RUNNER_TEMP/vocalarc-onnx-ort-core-win32-x64.dll"
-          Copy-Item "$bundle/runtime/onnxruntime_providers_shared.dll" "$env:RUNNER_TEMP/vocalarc-onnx-ort-shared-win32-x64.dll"
-          gh release upload $tag --repo $env:GITHUB_REPOSITORY --clobber "$env:RUNNER_TEMP/vocalarc-onnx-manifest-win32-x64.json" "$env:RUNNER_TEMP/vocalarc-onnx-model-directml-win32-x64.onnx" "$env:RUNNER_TEMP/vocalarc-onnx-sidecar-win32-x64.exe" "$env:RUNNER_TEMP/vocalarc-onnx-ort-core-win32-x64.dll" "$env:RUNNER_TEMP/vocalarc-onnx-ort-shared-win32-x64.dll"
+          $bundle = "$env:RUNNER_TEMP/bundle-win32-x64-directml"
+          Copy-Item "$bundle/manifest.json" "$env:RUNNER_TEMP/vocalarc-onnx-manifest-win32-x64-directml.json"
+          Copy-Item "$bundle/runtime/vocalarc-onnx-sidecar.exe" "$env:RUNNER_TEMP/vocalarc-onnx-sidecar-win32-x64-directml.exe"
+          Copy-Item "$bundle/runtime/onnxruntime.dll" "$env:RUNNER_TEMP/vocalarc-onnx-ort-core-win32-x64-directml.dll"
+          Copy-Item "$bundle/runtime/onnxruntime_providers_shared.dll" "$env:RUNNER_TEMP/vocalarc-onnx-ort-shared-win32-x64-directml.dll"
+          gh release upload $tag --repo $env:GITHUB_REPOSITORY --clobber `
+            "$env:RUNNER_TEMP/vocalarc-onnx-manifest-win32-x64-directml.json" `
+            "$env:RUNNER_TEMP/vocalarc-onnx-sidecar-win32-x64-directml.exe" `
+            "$env:RUNNER_TEMP/vocalarc-onnx-ort-core-win32-x64-directml.dll" `
+            "$env:RUNNER_TEMP/vocalarc-onnx-ort-shared-win32-x64-directml.dll"
         env:
           GH_TOKEN: ${{ github.token }}
 

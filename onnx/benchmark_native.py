@@ -136,26 +136,26 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument(
         "--max-abs-tol",
         type=_nonnegative_float,
-        default=0.10,
-        help="maximum permitted absolute waveform error (default: 0.10)",
+        default=5e-6,
+        help="maximum permitted absolute waveform error (default: 5e-6)",
     )
     parser.add_argument(
         "--rmse-tol",
         type=_nonnegative_float,
-        default=0.02,
-        help="maximum permitted waveform RMSE (default: 0.02)",
+        default=1e-6,
+        help="maximum permitted waveform RMSE (default: 1e-6)",
     )
     parser.add_argument(
         "--relative-rmse-tol",
         type=_nonnegative_float,
-        default=0.05,
-        help="maximum permitted RMSE/reference-RMS (default: 0.05)",
+        default=0.003,
+        help="maximum permitted RMSE/reference-RMS (default: 0.003)",
     )
     parser.add_argument(
         "--correlation-tol",
         type=_nonnegative_float,
-        default=0.001,
-        help="maximum permitted correlation deficit from one (default: 0.001)",
+        default=1e-5,
+        help="maximum permitted correlation deficit from one (default: 1e-5)",
     )
     parser.add_argument(
         "--no-fail-on-parity",
@@ -164,6 +164,19 @@ def _arguments() -> argparse.Namespace:
         help="write/report parity failures but exit successfully",
     )
     parser.set_defaults(fail_on_parity=True)
+    parser.add_argument(
+        "--min-speedup",
+        type=_positive_float,
+        default=1.0,
+        help="minimum native median speedup over PyTorch AMP (default: 1.0)",
+    )
+    parser.add_argument(
+        "--no-fail-on-speed",
+        dest="fail_on_speed",
+        action="store_false",
+        help="write/report a speed-gate failure but exit successfully",
+    )
+    parser.set_defaults(fail_on_speed=True)
     return parser.parse_args()
 
 
@@ -354,6 +367,9 @@ class NativeSidecar:
         except BaseException:
             self.close()
             raise
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        self.close()
 
     def _diagnostics(self) -> str:
         if self.process is None or self.process.stderr is None:
@@ -575,6 +591,8 @@ def _main() -> int:
     torch_median = _median(torch_timings)
     native_median = _median(native_timings)
     wall_median = _median(native_wall_timings)
+    speedup = torch_median / max(native_median, 1.0e-12)
+    speed_passed = speedup >= args.min_speedup
     report: dict[str, object] = {
         "schemaVersion": 1,
         "input": {
@@ -606,7 +624,7 @@ def _main() -> int:
             "timingsSeconds": native_timings,
             "medianSeconds": native_median,
             "realTimeFactor": duration / max(native_median, 1.0e-12),
-            "speedupOverPyTorch": torch_median / max(native_median, 1.0e-12),
+            "speedupOverPyTorch": speedup,
             "requestWallTimingsSeconds": native_wall_timings,
             "requestWallMedianSeconds": wall_median,
             "requestWallRealTimeFactor": duration / max(wall_median, 1.0e-12),
@@ -616,12 +634,22 @@ def _main() -> int:
             **serializable_metrics,
             **parity,
         },
+        "acceptance": {
+            "passed": bool(parity["passed"]) and speed_passed,
+            "parityPassed": bool(parity["passed"]),
+            "speedPassed": speed_passed,
+            "minimumSpeedup": args.min_speedup,
+        },
     }
     output_path = args.output.expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2, allow_nan=False))
-    return 0 if parity["passed"] or not args.fail_on_parity else 2
+    if not parity["passed"] and args.fail_on_parity:
+        return 2
+    if not speed_passed and args.fail_on_speed:
+        return 3
+    return 0
 
 
 if __name__ == "__main__":

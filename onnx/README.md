@@ -94,12 +94,32 @@ step moves the same session/manifest contract behind the C++ ONNX Runtime API.
 
 The shipped process is `native/onnx_sidecar.cpp`; it includes the WAV front
 end, overlap aggregation, bigshifts, TTA, JSONL protocol, and ONNX Runtime
-provider selection. It has no Python or model dependency at runtime:
+provider selection. CUDA releases also compile `native/cuda_dsp.cu`, which
+keeps the spectral tensors on the GPU and uses:
+
+- fused window/reflection and STFT-layout CUDA kernels around batched cuFFT;
+- ONNX Runtime CUDA I/O binding with stable device input/output buffers;
+- the graph's standard ONNX `Attention` nodes, which ORT dispatches to fused
+  flash-attention kernels; and
+- fused complex-mask and deterministic overlap-add CUDA kernels around inverse
+  cuFFT.
+
+It has no Python dependency at runtime. Build the CUDA 12 release path with:
 
 ```sh
-cmake -S native -B build -DORT_ROOT=/path/to/onnxruntime-sdk
+cmake -S native -B build \
+  -DORT_ROOT=/path/to/onnxruntime-gpu-sdk \
+  -DVOCALARC_ENABLE_CUDA_DSP=ON \
+  -DCUDAToolkit_ROOT=/usr/local/cuda-12.8 \
+  -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ```
+
+Leave `VOCALARC_ENABLE_CUDA_DSP=OFF` for the preserved DirectML/CoreML builds.
+CUDA Graph capture remains opt-in with `--cuda-graph on`: ORT 1.28 capture is
+not enabled in production because this graph performs an internal allocation
+that invalidates stream capture. Stable device buffers and I/O binding remain
+enabled without CUDA Graphs.
 
 Stage a release bundle with only the executable, graph, and provider libraries:
 
@@ -114,14 +134,43 @@ Stage a release bundle with only the executable, graph, and provider libraries:
 
 Each staged file is hashed and checked against GitHub's 2 GiB per-file limit;
 headers, checkpoints, Python, symbols, and unused provider libraries are not
-included.
+included. The accepted Linux executable is 194,608 bytes. Its self-contained
+CUDA bundle is 1.940 GiB across individual assets; the largest single asset is
+cuBLASLt at 751,771,728 bytes, comfortably below the release limit.
 
-On the RTX 5080 test machine, the CUDA FP16 graph measured 2.46 s for a
-19.99-second chunk in the upstream PyTorch CUDA AMP path, 2.52 s in Python
-ONNX Runtime, and 3.23 s in the C++ sidecar (bigshifts=1, TTA disabled). The
-Python ONNX waveform had 0.05% relative RMSE and 0.9999996 correlation against
-PyTorch AMP. The C++ CPU STFT/ISTFT path had 2.55% relative RMSE and 0.999676
-correlation against the Python ONNX waveform; the difference is the expected
-CPU FFT versus CUDA/cuFFT numerical path, not a graph-layout mismatch. The
-sidecar's output remains 31.9 dB above that numerical error and is suitable
-for the intended accelerated desktop path.
+Use the persistent native acceptance harness for the production comparison:
+
+```sh
+/home/dev/code/.venv/bin/python benchmark_native.py \
+  --sidecar build/vocalarc-onnx-sidecar \
+  --model artifacts/leap_xe/bs_roformer_leap_xe_spectral_b1_f1722.onnx \
+  --config ../../Music-Source-Separation-Training/configs/leap_xe_config_voc.yaml \
+  --checkpoint ../../Music-Source-Separation-Training/checkpoints/bs_leap_xe_voc.ckpt \
+  --provider cuda --warmups 1 --repeats 3 \
+  --output benchmark-native.json
+```
+
+Its defaults are the production settings: a deterministic 19.99-second input,
+`bigshifts=2`, TTA enabled, CUDA AMP reference, minimum speedup `1.0`, relative
+RMSE at most `0.003`, and correlation deficit at most `1e-5`. It exits nonzero
+when either speed or parity misses the gate.
+
+On the native Linux RTX 5080 acceptance machine (CUDA 12.8 sidecar, ORT 1.28
+CUDA 12, PyTorch 2.13 CUDA AMP), a representative three-repeat run measured:
+
+| Runtime | Median inference | Real-time factor |
+| --- | ---: | ---: |
+| PyTorch CUDA AMP | 14.7728 s | 1.3532x |
+| C++ ONNX CUDA sidecar | 14.6756 s | 1.3621x |
+
+That is a `1.00662x` speedup over PyTorch AMP. Request wall time, including
+WAV and JSONL overhead, was also `1.00336x` faster. Final waveform parity was
+`0.001060` relative RMSE, `2.13e-7` max absolute error, and `0.99999946`
+correlation. The native timing covers STFT, all ONNX calls, ISTFT, overlap,
+bigshifts, and TTA; process startup and WAV file I/O are reported separately.
+
+Linux and the primary Windows `win32-x64` release use CUDA 12.8 user-space
+libraries. The separately published `win32-x64-directml` target preserves the
+DirectML graph and non-NVIDIA implementation for later comparison and fallback
+testing. Native Windows performance is intentionally deferred until it can be
+measured on a Windows CUDA host.

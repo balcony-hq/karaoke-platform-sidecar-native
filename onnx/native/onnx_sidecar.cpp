@@ -11,6 +11,10 @@
 
 #include <onnxruntime_cxx_api.h>
 
+#if defined(VOCALARC_ENABLE_CUDA_DSP)
+#include "cuda_dsp.h"
+#endif
+
 #if defined(_WIN32) && __has_include(<dml_provider_factory.h>)
 #include <dml_provider_factory.h>
 #define VOCALARC_HAS_DML_FACTORY 1
@@ -38,6 +42,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -424,6 +429,7 @@ struct Options {
   fs::path model;
   std::string provider = "auto";
   int threads = 1;
+  bool cuda_graph = false;
   fs::path bundle_root;
   fs::path engine_cache;
 };
@@ -530,7 +536,9 @@ class Separator {
     const auto output_type_info = session_->GetOutputTypeInfo(0);
     const auto output_info = output_type_info.GetTensorTypeAndShapeInfo();
     output_type_ = output_info.GetElementType();
-    const auto shape = input_info.GetShape();
+    input_shape_ = input_info.GetShape();
+    output_shape_ = output_info.GetShape();
+    const auto& shape = input_shape_;
     if (shape.size() != 4 || shape[1] != kSpectralChannels || shape[2] != kFrames || shape[3] != 2) {
       std::ostringstream message;
       message << "ONNX model has an incompatible spectral input shape [";
@@ -543,15 +551,42 @@ class Separator {
     }
     batch_size_ = shape[0] > 0 ? static_cast<int>(shape[0]) : 1;
     if (batch_size_ > 2) throw std::runtime_error("ONNX batch size above two is not supported by this sidecar");
+    if (output_shape_.size() != 5 || output_shape_[0] != batch_size_ || output_shape_[1] != 1 ||
+        output_shape_[2] != kFrames || output_shape_[3] != kSpectralChannels || output_shape_[4] != 2) {
+      throw std::runtime_error("ONNX model has an incompatible spectral output shape");
+    }
     // FP16 graphs intentionally accept FP32 STFT values to preserve the
     // original CUDA AMP input path. Report model/output precision, not input
     // transport precision.
     dtype_ = output_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 ? "fp16" : "fp32";
+#if defined(VOCALARC_ENABLE_CUDA_DSP)
+    if (provider_ == "CUDAExecutionProvider" && input_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT &&
+        (output_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 ||
+         output_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)) {
+      cuda_dsp_ = std::make_unique<vocalarc::CudaDsp>(batch_size_);
+      cuda_memory_info_ = std::make_unique<Ort::MemoryInfo>(
+          "Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemTypeDefault);
+      cuda_input_ = std::make_unique<Ort::Value>(Ort::Value::CreateTensor<float>(
+          *cuda_memory_info_, static_cast<float*>(cuda_dsp_->model_input_data()),
+          cuda_dsp_->model_input_elements(), input_shape_.data(), input_shape_.size()));
+      const size_t output_bytes = cuda_dsp_->model_output_elements() *
+          (output_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 ? sizeof(Ort::Float16_t) : sizeof(float));
+      cuda_output_ = std::make_unique<Ort::Value>(Ort::Value::CreateTensor(
+          *cuda_memory_info_, cuda_dsp_->model_output_data(), output_bytes,
+          output_shape_.data(), output_shape_.size(), output_type_));
+      cuda_binding_ = std::make_unique<Ort::IoBinding>(*session_);
+      cuda_binding_->BindInput(input_name_.c_str(), *cuda_input_);
+      cuda_binding_->BindOutput(output_name_.c_str(), *cuda_output_);
+      cuda_dsp_enabled_ = true;
+    }
+#endif
   }
 
   const std::string& provider() const { return provider_; }
   const std::string& dtype() const { return dtype_; }
   int batch_size() const { return batch_size_; }
+  bool cuda_dsp_enabled() const { return cuda_dsp_enabled_; }
+  bool cuda_graph_enabled() const { return cuda_graph_enabled_; }
 
   Audio separate(const Audio& mix, int bigshifts, bool tta, std::string& profile) {
     const auto started = std::chrono::steady_clock::now();
@@ -569,14 +604,19 @@ class Separator {
         restored.channel(0)[index] = swapped_estimate.channel(1)[index];
         restored.channel(1)[index] = swapped_estimate.channel(0)[index];
       }
-      Audio inverted = scale_audio(bigshift(scale_audio(mix, -1.0f), bigshifts), -1.0f);
-      vocals = scale_audio(add_audio(add_audio(vocals, restored), inverted, -1.0f), 1.0f / 3.0f);
+      const Audio negative_estimate = bigshift(scale_audio(mix, -1.0f), bigshifts);
+      for (size_t index = 0; index < vocals.data.size(); ++index) {
+        vocals.data[index] = (vocals.data[index] + restored.data[index] - negative_estimate.data[index]) /
+                             3.0f;
+      }
     }
     const auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
     std::ostringstream value;
     value << "{\"provider\":\"" << json_escape(provider_) << "\",\"device\":\"" << json_escape(provider_)
           << "\",\"dtype\":\"" << dtype_
           << "\",\"bigshifts\":" << bigshifts << ",\"tta\":" << (tta ? "true" : "false")
+          << ",\"cudaDsp\":" << (cuda_dsp_enabled_ ? "true" : "false")
+          << ",\"cudaGraph\":" << (cuda_graph_enabled_ ? "true" : "false")
           << ",\"elapsedSeconds\":" << std::setprecision(9) << elapsed
           << ",\"realTimeFactor\":" << (mix.samples / static_cast<double>(kSampleRate)) / std::max(elapsed, 1.0e-9)
           << "}";
@@ -588,11 +628,20 @@ class Separator {
   void append_provider(Ort::SessionOptions& session_options, const std::string& requested) {
     const auto append_cpu = [&] { provider_ = "CPUExecutionProvider"; };
     const auto append_cuda = [&] {
-      OrtCUDAProviderOptions options{};
-      options.device_id = 0;
-      options.do_copy_in_default_stream = 1;
-      session_options.AppendExecutionProvider_CUDA(options);
+      bool enable_cuda_graph = false;
+#if defined(VOCALARC_ENABLE_CUDA_DSP)
+      enable_cuda_graph = options_.cuda_graph;
+#endif
+      Ort::CUDAProviderOptions options;
+      options.Update({
+          {"device_id", "0"},
+          {"do_copy_in_default_stream", "1"},
+          {"enable_cuda_graph", enable_cuda_graph ? "1" : "0"},
+          {"use_tf32", "1"},
+      });
+      session_options.AppendExecutionProvider_CUDA_V2(*options);
       provider_ = "CUDAExecutionProvider";
+      cuda_graph_enabled_ = enable_cuda_graph;
     };
     const auto append_tensorrt = [&] {
       OrtTensorRTProviderOptions options{};
@@ -654,6 +703,9 @@ class Separator {
 
   std::vector<Audio> predict(const std::vector<Audio>& chunks) {
     if (chunks.empty() || static_cast<int>(chunks.size()) > batch_size_) throw std::runtime_error("invalid model batch");
+#if defined(VOCALARC_ENABLE_CUDA_DSP)
+    if (cuda_dsp_) return predict_cuda(chunks);
+#endif
     const size_t per_input = static_cast<size_t>(kSpectralChannels) * kFrames * 2u;
     std::vector<float> input(static_cast<size_t>(batch_size_) * per_input, 0.0f);
     std::vector<std::vector<float>> stfts;
@@ -688,6 +740,75 @@ class Separator {
     auto output = session_->Run(run_options, input_names, &input_value, 1, output_names, 1);
     return decode_outputs(chunks, stfts, output[0]);
   }
+
+#if defined(VOCALARC_ENABLE_CUDA_DSP)
+  std::vector<Audio> predict_cuda(const std::vector<Audio>& chunks) {
+    std::vector<const float*> channels;
+    channels.reserve(chunks.size() * kChannels);
+    for (const Audio& chunk : chunks) {
+      if (chunk.samples != kChunkSamples) throw std::runtime_error("invalid CUDA DSP chunk size");
+      for (int channel = 0; channel < kChannels; ++channel) channels.push_back(chunk.channel(channel));
+    }
+    cuda_dsp_->encode(channels, static_cast<int>(chunks.size()));
+    const char* debug_prefix = std::getenv("VOCALARC_DEBUG_PREFIX");
+    if (debug_prefix && !debug_dumped_) {
+      std::vector<float> input = cuda_dsp_->download_model_input();
+      input.resize(static_cast<size_t>(kSpectralChannels) * kFrames * 2u);
+      dump_f32(fs::path(std::string(debug_prefix) + "-stft.f32"), input);
+    }
+
+    Ort::RunOptions run_options;
+    if (cuda_graph_enabled_ && !cuda_graph_warmed_) {
+      // CUDA libraries lazily initialize kernels and workspaces. Keep that
+      // initialization outside capture, then capture the next fixed-shape run.
+      run_options.AddConfigEntry("gpu_graph_id", "-1");
+      cuda_graph_warmed_ = true;
+    }
+    session_->Run(run_options, *cuda_binding_);
+
+    if (debug_prefix && !debug_dumped_) {
+      std::vector<float> raw = cuda_dsp_->download_model_output(
+          output_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
+      std::vector<float> mask(static_cast<size_t>(kSpectralChannels) * kFrames * 2u);
+      for (int frame = 0; frame < kFrames; ++frame) {
+        for (int frequency_channel = 0; frequency_channel < kSpectralChannels; ++frequency_channel) {
+          const size_t source = (static_cast<size_t>(frame) * kSpectralChannels + frequency_channel) * 2u;
+          const size_t destination = (static_cast<size_t>(frequency_channel) * kFrames + frame) * 2u;
+          mask[destination] = raw[source];
+          mask[destination + 1] = raw[source + 1];
+        }
+      }
+      dump_f32(fs::path(std::string(debug_prefix) + "-mask.f32"), mask);
+      debug_dumped_ = true;
+    }
+
+    std::vector<float> waveforms = cuda_dsp_->decode(
+        cuda_dsp_->model_output_data(), output_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
+        static_cast<int>(chunks.size()));
+    std::vector<Audio> result;
+    result.reserve(chunks.size());
+    if (chunks.size() == 1) {
+      Audio output;
+      output.channels = kChannels;
+      output.sample_rate = kSampleRate;
+      output.samples = kChunkSamples;
+      output.data = std::move(waveforms);
+      result.push_back(std::move(output));
+      return result;
+    }
+    for (size_t batch = 0; batch < chunks.size(); ++batch) {
+      Audio output;
+      output.channels = kChannels;
+      output.sample_rate = kSampleRate;
+      output.samples = kChunkSamples;
+      const size_t start = batch * kChannels * static_cast<size_t>(kChunkSamples);
+      output.data.assign(waveforms.begin() + static_cast<std::ptrdiff_t>(start),
+                         waveforms.begin() + static_cast<std::ptrdiff_t>(start + kChannels * kChunkSamples));
+      result.push_back(std::move(output));
+    }
+    return result;
+  }
+#endif
 
   std::vector<Audio> decode_outputs(const std::vector<Audio>& chunks, const std::vector<std::vector<float>>& stfts, Ort::Value& output) {
     const size_t per_output = static_cast<size_t>(kFrames) * kSpectralChannels * 2u;
@@ -758,8 +879,9 @@ class Separator {
         const size_t length = locations[batch].second;
         for (size_t index = 0; index < length; ++index) {
           float weight = fade_window[index];
-          if (first_batch) weight = 1.0f;
-          else if (final_batch) weight = 1.0f;
+          // The reference scheduler keeps the trailing fade on its first
+          // batch and only disables it for a later final batch.
+          if (!first_batch && final_batch) weight = 1.0f;
           for (int channel = 0; channel < kChannels; ++channel) {
             const size_t destination = static_cast<size_t>(channel) * working.samples + start + index;
             result[destination] += estimates[batch].channel(channel)[index] * weight;
@@ -785,22 +907,40 @@ class Separator {
     Audio result = mix;
     std::fill(result.data.begin(), result.data.end(), 0.0f);
     const size_t shift_size = mix.samples / static_cast<size_t>(count);
-    for (int index = 0; index < count; ++index) result = add_audio(result, unrotate_audio(demix(rotate_audio(mix, static_cast<size_t>(index) * shift_size)), static_cast<size_t>(index) * shift_size));
-    return scale_audio(result, 1.0f / count);
+    for (int index = 0; index < count; ++index) {
+      const size_t shift = static_cast<size_t>(index) * shift_size;
+      const Audio estimate = unrotate_audio(demix(rotate_audio(mix, shift)), shift);
+      for (size_t sample = 0; sample < result.data.size(); ++sample) result.data[sample] += estimate.data[sample];
+    }
+    const float scale = 1.0f / count;
+    for (float& sample : result.data) sample *= scale;
+    return result;
   }
 
   Ort::Env env_;
   const Options& options_;
   Ort::AllocatorWithDefaultOptions allocator_;
   std::unique_ptr<Ort::Session> session_;
+#if defined(VOCALARC_ENABLE_CUDA_DSP)
+  std::unique_ptr<vocalarc::CudaDsp> cuda_dsp_;
+  std::unique_ptr<Ort::MemoryInfo> cuda_memory_info_;
+  std::unique_ptr<Ort::Value> cuda_input_;
+  std::unique_ptr<Ort::Value> cuda_output_;
+  std::unique_ptr<Ort::IoBinding> cuda_binding_;
+#endif
   std::string input_name_;
   std::string output_name_;
   std::string provider_;
   std::string dtype_;
   std::string engine_cache_string_;
+  std::vector<int64_t> input_shape_;
+  std::vector<int64_t> output_shape_;
   ONNXTensorElementDataType input_type_ = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
   ONNXTensorElementDataType output_type_ = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
   int batch_size_ = 1;
+  bool cuda_dsp_enabled_ = false;
+  bool cuda_graph_enabled_ = false;
+  bool cuda_graph_warmed_ = false;
   bool debug_dumped_ = false;
 };
 
@@ -815,10 +955,16 @@ Options parse_options(int argc, char** argv) {
     if (argument == "--model") options.model = value();
     else if (argument == "--provider") options.provider = value();
     else if (argument == "--threads") options.threads = std::max(1, std::stoi(value()));
+    else if (argument == "--cuda-graph") {
+      const std::string enabled = value();
+      if (enabled == "1" || enabled == "true" || enabled == "on") options.cuda_graph = true;
+      else if (enabled == "0" || enabled == "false" || enabled == "off") options.cuda_graph = false;
+      else throw std::runtime_error("--cuda-graph must be on or off");
+    }
     else if (argument == "--bundle-root") options.bundle_root = value();
     else if (argument == "--engine-cache") options.engine_cache = value();
     else if (argument == "--help") {
-      std::cout << "usage: vocalarc-onnx-sidecar --model MODEL [--provider auto|cuda|tensorrt|directml|coreml|openvino|cpu]\n";
+      std::cout << "usage: vocalarc-onnx-sidecar --model MODEL [--provider auto|cuda|tensorrt|directml|coreml|openvino|cpu] [--cuda-graph on|off]\n";
       std::exit(0);
     } else throw std::runtime_error("unknown argument: " + argument);
   }
@@ -846,7 +992,9 @@ int main(int argc, char** argv) {
         if (type == "ping") {
           std::cout << "{\"id\":" << id << ",\"ok\":true,\"type\":\"pong\",\"runtime\":\"vocalarc-onnx-cpp\",\"provider\":\""
                     << json_escape(separator.provider()) << "\",\"dtype\":\"" << separator.dtype()
-                    << "\",\"supports\":{\"bigshifts\":true,\"tta\":true,\"cpu\":true}}\n";
+                    << "\",\"cudaDsp\":" << (separator.cuda_dsp_enabled() ? "true" : "false")
+                    << ",\"cudaGraph\":" << (separator.cuda_graph_enabled() ? "true" : "false")
+                    << ",\"supports\":{\"bigshifts\":true,\"tta\":true,\"cpu\":true}}\n";
         } else if (type == "load") {
           std::cout << "{\"id\":" << id << ",\"ok\":true,\"type\":\"loaded\",\"provider\":\""
                     << json_escape(separator.provider()) << "\"}\n";

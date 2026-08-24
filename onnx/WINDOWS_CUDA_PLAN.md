@@ -81,11 +81,12 @@ ORT CUDA 12 provider does not import cuDNN or cuRAND for this graph. SDK
 headers, import libraries, PDBs, checkpoints, and unused provider DLLs are not
 published.
 
-The workflow creates a pinned NVIDIA-channel CUDA 12.8 build environment,
-builds with MSVC/Ninja, stages the exact runtime DLLs, runs a CPU protocol smoke
-test (GitHub's Windows runner has no NVIDIA GPU), and prints PE dependencies
-with `dumpbin`. Each staged file is hashed in schema-v3 `manifest.json` and
-must remain below GitHub's 2 GiB per-file limit.
+The workflow creates a pinned NVIDIA-channel CUDA 12.8 build environment on a
+`windows-2022` runner (CUDA 12.8's supported MSVC generation), builds with
+MSVC/Ninja, stages the exact runtime DLLs, runs a CPU protocol smoke test
+(GitHub's Windows runner has no NVIDIA GPU), and prints PE dependencies with
+`dumpbin`. Each staged file is hashed in schema-v3 `manifest.json` and must
+remain below GitHub's 2 GiB per-file limit.
 
 ## Device compatibility
 

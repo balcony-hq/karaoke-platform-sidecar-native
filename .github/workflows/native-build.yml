@@ -121,7 +121,7 @@ jobs:
     if: >-
       (github.event_name == 'release' && startsWith(github.event.release.tag_name, 'vocalarc-onnx-v')) ||
       (github.event_name == 'workflow_dispatch' && startsWith(inputs.release_tag, 'vocalarc-onnx-v'))
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
       - name: Download ONNX Runtime CUDA 12 SDK
@@ -156,7 +156,6 @@ jobs:
             -DVOCALARC_ENABLE_CUDA_DSP=ON `
             -DCMAKE_CUDA_COMPILER="$env:CUDA_ROOT\bin\nvcc.exe" `
             -DCUDAToolkit_ROOT="$env:CUDA_ROOT" `
-            -DCMAKE_CUDA_FLAGS=--allow-unsupported-compiler `
             -DCMAKE_CUDA_ARCHITECTURES="60;70;75;80;86;89;90;100;120" `
             -DCMAKE_BUILD_TYPE=Release
           cmake --build "$env:RUNNER_TEMP/build-cuda" --parallel

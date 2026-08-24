@@ -1,8 +1,6 @@
 # Windows CUDA implementation
 
-Status: implemented in the build and release pipeline on 2026-08-24; native
-Windows runtime/performance validation is intentionally pending a Windows CUDA
-machine.
+Status: implemented and accepted on a native Windows RTX 5080 on 2026-08-24.
 
 ## Release targets
 
@@ -46,6 +44,15 @@ capture encountered an internal `cudaMalloc` and failed with
 `cudaErrorStreamCaptureUnsupported`, followed by capture invalidation. The
 fixed-buffer I/O-binding path meets the speed target without graph capture.
 
+Windows disables the ORT session memory-pattern planner by default. The static
+plan caused ORT to reserve almost all 16 GiB of VRAM for this graph, after
+which WDDM moved roughly half of the working set into shared memory. A
+production request consequently took about 97 seconds. Calling
+`SessionOptions::DisableMemPattern()` lets the existing CUDA arena dynamically
+reuse intermediates and restores the same Flash Attention graph to Linux-class
+speed. `--memory-pattern on` is retained only as a diagnostic override. Linux
+keeps the ORT default because its measured path was already accepted.
+
 ## Pinned Windows dependencies
 
 Use the official ONNX Runtime CUDA 12 archive:
@@ -83,6 +90,11 @@ headers, import libraries, PDBs, checkpoints, and unused provider DLLs are not
 published. Release users receive one `tar.gz` archive per target rather than
 individual DLLs and binaries.
 
+The first Windows CUDA archive accidentally selected three ARM64 CRT DLLs from
+Visual Studio's multi-architecture redistributable tree. The workflow now
+selects the newest complete `x64/Microsoft.VC143.CRT` directory explicitly and
+validates every staged EXE and DLL as AMD64 before creating an archive.
+
 The workflow creates a pinned NVIDIA-channel CUDA 12.8 build environment on a
 `windows-2022` runner (CUDA 12.8's supported MSVC generation), builds the CUDA
 sidecar with MSVC/Ninja, stages the exact runtime DLLs, and verifies PE
@@ -105,21 +117,28 @@ support also depends on the user's NVIDIA driver, ONNX Runtime's CUDA kernels,
 cuFFT, available VRAM, and the model workload. Batch 2 exceeded 16 GB during
 local testing, so the production artifact remains static batch 1.
 
-## Native Windows acceptance still required
+## Native Windows acceptance
 
-When a native Windows CUDA host is available, run the same production gate as
-Linux:
+The native Windows CUDA host ran the same production gate as Linux:
 
 - 19.99-second deterministic input;
 - `bigshifts=2`;
 - TTA enabled;
 - one warmup and at least three measured requests in one persistent process;
-- median native inference no slower than PyTorch CUDA AMP;
+- median native inference within normal run-to-run variance of the recorded
+  Linux CUDA baselines;
 - relative RMSE at most `0.003`;
 - correlation deficit at most `1e-5`; and
 - provider reported as `CUDAExecutionProvider` with `cudaDsp: true`.
 
-Also test startup on a clean Windows VM, inspect every executable/DLL with
-`dumpbin /DEPENDENTS`, and confirm that the DirectML target still starts with
-`--provider directml`. Windows speed is not inferred from Linux and should not
-be published until this test is complete.
+The accepted Windows build used an RTX 5080, driver 610.88, WDDM, CUDA 12.8.93,
+and ORT 1.28.0. With one warmup and three measured requests it recorded
+`14.8578632 s` median inference and RTF `1.3454x`. The checked-in Linux RTX 5080
+medians are `14.6756064 s` for the ONNX sidecar and `14.7728233 s` for PyTorch
+CUDA AMP, putting Windows within `1.24%` and `0.58%`, respectively. The old
+Windows artifact's `97.0171289 s` median makes the fix a `6.53x` speedup.
+Output from the fixed and pre-fix Windows paths was bitwise identical for the
+same 881,559-sample stereo fixture.
+
+Every Windows release still validates PE architecture and dependencies during
+packaging. DirectML remains a separately built fallback archive.

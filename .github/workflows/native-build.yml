@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "onnx/**"
+      - ".github/scripts/**"
       - ".github/workflows/native-build.yml"
   release:
     types: [published]
@@ -170,9 +171,37 @@ jobs:
         shell: pwsh
         run: |
           $ort = "$env:RUNNER_TEMP\onnxruntime-win-x64-gpu_cuda12-1.28.0"
-          $redistDll = Get-ChildItem "$env:VS_INSTALL_ROOT\VC\Redist\MSVC" -Recurse -File -Filter MSVCP140.dll | Select-Object -First 1
-          if (-not $redistDll) { throw "MSVC redistributable was not found" }
-          $redist = $redistDll.Directory.FullName
+          $redistRoot = Join-Path $env:VS_INSTALL_ROOT "VC\Redist\MSVC"
+          $crtFiles = @(
+            "MSVCP140.dll",
+            "MSVCP140_1.dll",
+            "VCRUNTIME140.dll",
+            "VCRUNTIME140_1.dll"
+          )
+          $redist = $null
+          # The MSVC redist tree also contains arm64 and x86 CRTs. Select the
+          # newest complete x64 CRT directory by version, never by recursive
+          # file enumeration order.
+          $redistVersions = Get-ChildItem -LiteralPath $redistRoot -Directory |
+            Where-Object { $_.Name -match '^\d+(?:\.\d+){1,3}$' } |
+            Sort-Object `
+              @{ Expression = { [version]$_.Name }; Descending = $true }, `
+              @{ Expression = { $_.Name }; Descending = $false }
+          foreach ($version in $redistVersions) {
+            $candidate = Join-Path $version.FullName "x64\Microsoft.VC143.CRT"
+            if (-not (Test-Path -LiteralPath $candidate -PathType Container)) { continue }
+            $missing = @($crtFiles | Where-Object {
+              -not (Test-Path -LiteralPath (Join-Path $candidate $_) -PathType Leaf)
+            })
+            if ($missing.Count -eq 0) {
+              $redist = $candidate
+              break
+            }
+          }
+          if (-not $redist) {
+            throw "Complete x64 MSVC redistributable was not found under $redistRoot"
+          }
+          Write-Host "Using x64 MSVC redistributable: $redist"
           python onnx/package_runtime.py `
             --sidecar "$env:RUNNER_TEMP/vocalarc-onnx-sidecar.exe" `
             --model "$env:RUNNER_TEMP/vocalarc-onnx-model-cuda-linux-x64.onnx" `
@@ -189,6 +218,8 @@ jobs:
             --dependency "$redist\VCRUNTIME140_1.dll"
           if ($LASTEXITCODE -ne 0) { throw "Windows CUDA bundle packaging failed" }
           $bundle = "$env:RUNNER_TEMP/bundle-win32-x64"
+          python .github/scripts/validate_windows_pe.py --root $bundle --machine amd64
+          if ($LASTEXITCODE -ne 0) { throw "Windows CUDA bundle PE-machine validation failed" }
           $env:PATH = "$bundle\runtime;$env:PATH"
           $dumpbin = Get-ChildItem "$env:VS_INSTALL_ROOT\VC\Tools\MSVC" -Recurse -File -Filter dumpbin.exe | Select-Object -First 1
           if (-not $dumpbin) { throw "dumpbin.exe was not found" }

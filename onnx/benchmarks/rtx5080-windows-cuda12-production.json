@@ -1,0 +1,100 @@
+{
+  "schemaVersion": 1,
+  "environment": {
+    "os": "Microsoft Windows 11 Education 10.0.26200 x64",
+    "session": "RDP on native Windows host",
+    "driverModel": "WDDM",
+    "gpu": "NVIDIA GeForce RTX 5080",
+    "gpuMemoryMiB": 16303,
+    "driver": "610.88",
+    "sidecarCudaToolkit": "12.8.93",
+    "onnxRuntime": "1.28.0 CUDA 12"
+  },
+  "input": {
+    "path": null,
+    "generatedBy": "local deterministic float32 stereo sine fixture",
+    "seconds": 19.99,
+    "samples": 881559,
+    "sampleRate": 44100,
+    "channels": 2
+  },
+  "settings": {
+    "bigshifts": 2,
+    "tta": true,
+    "warmups": 1,
+    "repeats": 3,
+    "threads": 1,
+    "productionDefaults": true
+  },
+  "model": {
+    "precision": "fp16",
+    "inputPrecision": "fp32",
+    "opset": 24,
+    "modelSha256": "aed685874a9f9906c2e6da2341297e9f1a765ad41a7bdd171a6179bf8b75dc25"
+  },
+  "before": {
+    "release": "vocalarc-onnx-v0.1.0",
+    "timingsSeconds": [
+      97.0002561,
+      97.0171289,
+      104.404293
+    ],
+    "medianSeconds": 97.0171289,
+    "realTimeFactor": 0.206046089248885,
+    "memoryPattern": true
+  },
+  "native": {
+    "persistent": true,
+    "startupSeconds": 1.1784853,
+    "ping": {
+      "ok": true,
+      "type": "pong",
+      "runtime": "vocalarc-onnx-cpp",
+      "provider": "CUDAExecutionProvider",
+      "dtype": "fp16",
+      "cudaDsp": true,
+      "cudaGraph": false,
+      "memoryPattern": false
+    },
+    "timingDefinition": "C++ profile.elapsedSeconds; excludes WAV I/O and process startup",
+    "warmupSeconds": 15.1403309,
+    "timingsSeconds": [
+      14.8578632,
+      14.847899,
+      14.9581334
+    ],
+    "medianSeconds": 14.8578632,
+    "realTimeFactor": 1.3454155372759118,
+    "requestWallTimingsSeconds": [
+      14.9874176,
+      14.9816003,
+      15.0869565
+    ],
+    "requestWallMedianSeconds": 14.9874176,
+    "requestWallRealTimeFactor": 1.3337854814961583,
+    "speedupOverPublishedWindows": 6.529682471433712
+  },
+  "linuxBaselines": {
+    "report": "rtx5080-cuda12-production.json",
+    "onnxMedianSeconds": 14.6756064,
+    "pytorchCudaAmpMedianSeconds": 14.772823276000054,
+    "windowsToOnnxTimeRatio": 1.0124190302623544,
+    "windowsToPytorchTimeRatio": 1.0057565112917923
+  },
+  "waveformParity": {
+    "reference": "pre-fix Windows CUDA output for the same model, input, and production settings",
+    "samples": 881559,
+    "bitwiseEqual": true,
+    "maxAbs": 0.0,
+    "rmse": 0.0,
+    "relativeRmse": 0.0,
+    "correlation": 1.0
+  },
+  "acceptance": {
+    "passed": true,
+    "providerPassed": true,
+    "waveformParityPassed": true,
+    "performanceParityPassed": true,
+    "maximumLinuxOnnxTimeRatio": 1.02
+  }
+}

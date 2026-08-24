@@ -430,6 +430,13 @@ struct Options {
   std::string provider = "auto";
   int threads = 1;
   bool cuda_graph = false;
+#if defined(_WIN32)
+  // ORT's static plan over-reserves this graph's CUDA intermediates under
+  // WDDM and triggers residency paging. Dynamic arena reuse avoids that plan.
+  bool memory_pattern = false;
+#else
+  bool memory_pattern = true;
+#endif
   fs::path bundle_root;
   fs::path engine_cache;
 };
@@ -523,6 +530,7 @@ class Separator {
     if (options_.model.empty()) throw std::runtime_error("--model is required");
     Ort::SessionOptions session_options;
     session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+    if (!options_.memory_pattern) session_options.DisableMemPattern();
     session_options.SetIntraOpNumThreads(std::max(1, options_.threads));
     session_options.SetInterOpNumThreads(1);
     session_options.AddConfigEntry("session.intra_op.allow_spinning", "1");
@@ -587,6 +595,7 @@ class Separator {
   int batch_size() const { return batch_size_; }
   bool cuda_dsp_enabled() const { return cuda_dsp_enabled_; }
   bool cuda_graph_enabled() const { return cuda_graph_enabled_; }
+  bool memory_pattern_enabled() const { return options_.memory_pattern; }
 
   Audio separate(const Audio& mix, int bigshifts, bool tta, std::string& profile) {
     const auto started = std::chrono::steady_clock::now();
@@ -617,6 +626,7 @@ class Separator {
           << "\",\"bigshifts\":" << bigshifts << ",\"tta\":" << (tta ? "true" : "false")
           << ",\"cudaDsp\":" << (cuda_dsp_enabled_ ? "true" : "false")
           << ",\"cudaGraph\":" << (cuda_graph_enabled_ ? "true" : "false")
+          << ",\"memoryPattern\":" << (options_.memory_pattern ? "true" : "false")
           << ",\"elapsedSeconds\":" << std::setprecision(9) << elapsed
           << ",\"realTimeFactor\":" << (mix.samples / static_cast<double>(kSampleRate)) / std::max(elapsed, 1.0e-9)
           << "}";
@@ -968,10 +978,16 @@ Options parse_options(int argc, char** argv) {
       else if (enabled == "0" || enabled == "false" || enabled == "off") options.cuda_graph = false;
       else throw std::runtime_error("--cuda-graph must be on or off");
     }
+    else if (argument == "--memory-pattern") {
+      const std::string enabled = value();
+      if (enabled == "1" || enabled == "true" || enabled == "on") options.memory_pattern = true;
+      else if (enabled == "0" || enabled == "false" || enabled == "off") options.memory_pattern = false;
+      else throw std::runtime_error("--memory-pattern must be on or off");
+    }
     else if (argument == "--bundle-root") options.bundle_root = value();
     else if (argument == "--engine-cache") options.engine_cache = value();
     else if (argument == "--help") {
-      std::cout << "usage: vocalarc-onnx-sidecar --model MODEL [--provider auto|cuda|tensorrt|directml|coreml|openvino|cpu] [--cuda-graph on|off]\n";
+      std::cout << "usage: vocalarc-onnx-sidecar --model MODEL [--provider auto|cuda|tensorrt|directml|coreml|openvino|cpu] [--cuda-graph on|off] [--memory-pattern on|off]\n";
       std::exit(0);
     } else throw std::runtime_error("unknown argument: " + argument);
   }
@@ -1001,6 +1017,7 @@ int main(int argc, char** argv) {
                     << json_escape(separator.provider()) << "\",\"dtype\":\"" << separator.dtype()
                     << "\",\"cudaDsp\":" << (separator.cuda_dsp_enabled() ? "true" : "false")
                     << ",\"cudaGraph\":" << (separator.cuda_graph_enabled() ? "true" : "false")
+                    << ",\"memoryPattern\":" << (separator.memory_pattern_enabled() ? "true" : "false")
                     << ",\"supports\":{\"bigshifts\":true,\"tta\":true,\"cpu\":true}}\n";
         } else if (type == "load") {
           std::cout << "{\"id\":" << id << ",\"ok\":true,\"type\":\"loaded\",\"provider\":\""

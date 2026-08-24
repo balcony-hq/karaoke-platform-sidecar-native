@@ -121,6 +121,13 @@ not enabled in production because this graph performs an internal allocation
 that invalidates stream capture. Stable device buffers and I/O binding remain
 enabled without CUDA Graphs.
 
+On Windows, the sidecar disables ORT's static memory-pattern planner by
+default. For this fixed axial-attention graph, the static plan reserves almost
+the entire 16 GiB RTX 5080 under WDDM and causes GPU-residency paging. Dynamic
+CUDA-arena reuse preserves the same graph, Flash Attention path, and output
+while restoring Linux-class throughput. `--memory-pattern on` remains
+available as a diagnostic override; Linux keeps ORT's default planner.
+
 Stage a release bundle with only the executable, graph, and provider libraries:
 
 ```sh
@@ -173,7 +180,11 @@ correlation. The native timing covers STFT, all ONNX calls, ISTFT, overlap,
 bigshifts, and TTA; process startup and WAV file I/O are reported separately.
 
 Linux and the primary Windows `win32-x64` release use CUDA 12.8 user-space
-libraries. The separately published `win32-x64-directml` target preserves the
-DirectML graph and non-NVIDIA implementation for later comparison and fallback
-testing. Native Windows performance is intentionally deferred until it can be
-measured on a Windows CUDA host.
+libraries. On the same production dimensions and settings, the accepted
+Windows RTX 5080 build measured `14.8579 s` median inference (RTF `1.3454x`),
+within `1.24%` of the recorded Linux ONNX median and `0.58%` of the recorded
+Linux PyTorch CUDA AMP median. The pre-fix Windows artifact took `97.0171 s`;
+disabling its oversized ORT memory pattern produced a `6.53x` speedup with
+bitwise-identical Windows output. The separately published
+`win32-x64-directml` target preserves the DirectML graph and non-NVIDIA
+fallback.

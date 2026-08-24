@@ -134,9 +134,12 @@ Stage a release bundle with only the executable, graph, and provider libraries:
 
 Each staged file is hashed and checked against GitHub's 2 GiB per-file limit;
 headers, checkpoints, Python, symbols, and unused provider libraries are not
-included. The accepted Linux executable is 194,608 bytes. Its self-contained
-CUDA bundle is 1.940 GiB across individual assets; the largest single asset is
-cuBLASLt at 751,771,728 bytes, comfortably below the release limit.
+included. The release workflow then packs the complete staged directory into
+one deterministic `tar.gz` archive per target. The archive contains
+`manifest.json`, `models/model.onnx`, the sidecar executable, and every
+provider/runtime library required by that target. The accepted Linux
+executable is 194,608 bytes. The Linux CUDA archive is self-contained and
+remains below GitHub's 2 GiB per-file release limit.
 
 Use the persistent native acceptance harness for the production comparison:
 

@@ -19,9 +19,10 @@ The desktop reads `manifest.json` and passes its provider explicitly instead
 of using Windows' DML-first `auto` order. A future release lock can select the
 DirectML bundle with `VOCALARC_SIDECAR_TARGET=win32-x64-directml`.
 
-The existing desktop lock remains pinned to the already published v0.1.0
-DirectML release until a new CUDA release exists and its asset SHA-256 values
-can be recorded. Do not invent lock hashes before publication.
+The desktop lock selects the CUDA archive for `win32-x64` and keeps the
+DirectML archive as an explicit fallback target. Each archive contains its
+manifest, model, executable, and all provider/runtime DLLs; the desktop
+verifies the archive digest and every embedded manifest file before staging.
 
 ## CUDA implementation
 
@@ -57,7 +58,7 @@ Do not substitute `Microsoft.ML.OnnxRuntime.Gpu.Windows/1.28.0`: the inspected
 generic NuGet package imports CUDA 13 DLL names. CUDA 12 supports a wider set
 of deployed drivers and matches the Linux bundle.
 
-The primary Windows runtime contains only:
+The primary Windows archive contains only:
 
 ```text
 runtime/vocalarc-onnx-sidecar.exe
@@ -79,7 +80,8 @@ manifest.json
 The NVIDIA display driver supplies `nvcuda.dll`; never bundle it. The inspected
 ORT CUDA 12 provider does not import cuDNN or cuRAND for this graph. SDK
 headers, import libraries, PDBs, checkpoints, and unused provider DLLs are not
-published.
+published. Release users receive one `tar.gz` archive per target rather than
+individual DLLs and binaries.
 
 The workflow creates a pinned NVIDIA-channel CUDA 12.8 build environment on a
 `windows-2022` runner (CUDA 12.8's supported MSVC generation), builds the CUDA

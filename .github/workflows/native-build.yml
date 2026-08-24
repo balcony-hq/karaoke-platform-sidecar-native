@@ -55,8 +55,16 @@ jobs:
       - name: Download CUDA graph from this release
         run: |
           tag="${{ github.event.release.tag_name || inputs.release_tag }}"
-          gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
-            --pattern vocalarc-onnx-model-cuda-linux-x64.onnx --dir "$RUNNER_TEMP"
+          archive="$RUNNER_TEMP/vocalarc-onnx-linux-x64.tar.gz"
+          if gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+            --pattern vocalarc-onnx-linux-x64.tar.gz --dir "$RUNNER_TEMP"; then
+            python3 onnx/extract_archive_model.py \
+              --archive "$archive" \
+              --output "$RUNNER_TEMP/vocalarc-onnx-model-cuda-linux-x64.onnx"
+          else
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+              --pattern vocalarc-onnx-model-cuda-linux-x64.onnx --dir "$RUNNER_TEMP"
+          fi
         env:
           GH_TOKEN: ${{ github.token }}
       - name: Smoke-test JSONL protocol
@@ -87,33 +95,15 @@ jobs:
             --dependency "$RUNNER_TEMP/cuda-libs/nvidia/cuda_runtime/lib/libcudart.so.12" \
             --dependency "$RUNNER_TEMP/cuda-libs/nvidia/cufft/lib/libcufft.so.11"
           test "$(stat -c%s "$RUNNER_TEMP/bundle-linux-x64/models/model.onnx")" -lt $((2 * 1024 * 1024 * 1024))
-      - name: Upload Linux release assets
+      - name: Archive and upload Linux runtime
         run: |
           tag="${{ github.event.release.tag_name || inputs.release_tag }}"
           bundle="$RUNNER_TEMP/bundle-linux-x64"
-          cp "$bundle/manifest.json" "$RUNNER_TEMP/vocalarc-onnx-manifest-linux-x64.json"
-          cp "$bundle/models/model.onnx" "$RUNNER_TEMP/vocalarc-onnx-model-cuda-linux-x64.onnx"
-          cp "$bundle/runtime/vocalarc-onnx-sidecar" "$RUNNER_TEMP/vocalarc-onnx-sidecar-linux-x64"
-          cp "$bundle/runtime/libonnxruntime.so.1" "$RUNNER_TEMP/vocalarc-onnx-ort-core-linux-x64.so"
-          cp "$bundle/runtime/libonnxruntime_providers_cuda.so" "$RUNNER_TEMP/vocalarc-onnx-ort-cuda-linux-x64.so"
-          cp "$bundle/runtime/libonnxruntime_providers_shared.so" "$RUNNER_TEMP/vocalarc-onnx-ort-shared-linux-x64.so"
-          cp "$bundle/runtime/libcublasLt.so.12" "$RUNNER_TEMP/vocalarc-onnx-cuda-cublasLt-linux-x64.so"
-          cp "$bundle/runtime/libcublas.so.12" "$RUNNER_TEMP/vocalarc-onnx-cuda-cublas-linux-x64.so"
-          cp "$bundle/runtime/libcurand.so.10" "$RUNNER_TEMP/vocalarc-onnx-cuda-curand-linux-x64.so"
-          cp "$bundle/runtime/libcudart.so.12" "$RUNNER_TEMP/vocalarc-onnx-cuda-cudart-linux-x64.so"
-          cp "$bundle/runtime/libcufft.so.11" "$RUNNER_TEMP/vocalarc-onnx-cuda-cufft-linux-x64.so"
+          python3 onnx/create_release_archive.py \
+            --bundle "$bundle" \
+            --output "$RUNNER_TEMP/vocalarc-onnx-linux-x64.tar.gz"
           gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber \
-            "$RUNNER_TEMP/vocalarc-onnx-manifest-linux-x64.json" \
-            "$RUNNER_TEMP/vocalarc-onnx-model-cuda-linux-x64.onnx" \
-            "$RUNNER_TEMP/vocalarc-onnx-sidecar-linux-x64" \
-            "$RUNNER_TEMP/vocalarc-onnx-ort-core-linux-x64.so" \
-            "$RUNNER_TEMP/vocalarc-onnx-ort-cuda-linux-x64.so" \
-            "$RUNNER_TEMP/vocalarc-onnx-ort-shared-linux-x64.so" \
-            "$RUNNER_TEMP/vocalarc-onnx-cuda-cublasLt-linux-x64.so" \
-            "$RUNNER_TEMP/vocalarc-onnx-cuda-cublas-linux-x64.so" \
-            "$RUNNER_TEMP/vocalarc-onnx-cuda-curand-linux-x64.so" \
-            "$RUNNER_TEMP/vocalarc-onnx-cuda-cudart-linux-x64.so" \
-            "$RUNNER_TEMP/vocalarc-onnx-cuda-cufft-linux-x64.so"
+            "$RUNNER_TEMP/vocalarc-onnx-linux-x64.tar.gz"
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -166,7 +156,14 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ github.event.release.tag_name || inputs.release_tag }}"
-          gh release download $tag --repo $env:GITHUB_REPOSITORY --pattern vocalarc-onnx-model-cuda-linux-x64.onnx --dir $env:RUNNER_TEMP
+          $archive = "$env:RUNNER_TEMP/vocalarc-onnx-linux-x64.tar.gz"
+          & gh release download $tag --repo $env:GITHUB_REPOSITORY --pattern vocalarc-onnx-linux-x64.tar.gz --dir $env:RUNNER_TEMP
+          if ($LASTEXITCODE -eq 0) {
+            python onnx/extract_archive_model.py --archive $archive --output "$env:RUNNER_TEMP/vocalarc-onnx-model-cuda-linux-x64.onnx"
+          } else {
+            & gh release download $tag --repo $env:GITHUB_REPOSITORY --pattern vocalarc-onnx-model-cuda-linux-x64.onnx --dir $env:RUNNER_TEMP
+            if ($LASTEXITCODE -ne 0) { throw "CUDA graph download failed" }
+          }
         env:
           GH_TOKEN: ${{ github.token }}
       - name: Stage and validate Windows CUDA bundle
@@ -209,40 +206,14 @@ jobs:
               $providerDeps -notmatch "cudart64_12\.dll") {
             throw "Windows CUDA provider is missing an expected CUDA dependency"
           }
-      - name: Upload Windows CUDA release assets
+      - name: Archive and upload Windows CUDA runtime
         shell: pwsh
         run: |
           $tag = "${{ github.event.release.tag_name || inputs.release_tag }}"
           $bundle = "$env:RUNNER_TEMP/bundle-win32-x64"
-          Copy-Item "$bundle/manifest.json" "$env:RUNNER_TEMP/vocalarc-onnx-manifest-win32-x64.json"
-          Copy-Item "$bundle/models/model.onnx" "$env:RUNNER_TEMP/vocalarc-onnx-model-cuda-win32-x64.onnx"
-          Copy-Item "$bundle/runtime/vocalarc-onnx-sidecar.exe" "$env:RUNNER_TEMP/vocalarc-onnx-sidecar-win32-x64.exe"
-          Copy-Item "$bundle/runtime/onnxruntime.dll" "$env:RUNNER_TEMP/vocalarc-onnx-ort-core-win32-x64.dll"
-          Copy-Item "$bundle/runtime/onnxruntime_providers_cuda.dll" "$env:RUNNER_TEMP/vocalarc-onnx-ort-cuda-win32-x64.dll"
-          Copy-Item "$bundle/runtime/onnxruntime_providers_shared.dll" "$env:RUNNER_TEMP/vocalarc-onnx-ort-shared-win32-x64.dll"
-          Copy-Item "$bundle/runtime/cublasLt64_12.dll" "$env:RUNNER_TEMP/vocalarc-onnx-cuda-cublasLt-win32-x64.dll"
-          Copy-Item "$bundle/runtime/cublas64_12.dll" "$env:RUNNER_TEMP/vocalarc-onnx-cuda-cublas-win32-x64.dll"
-          Copy-Item "$bundle/runtime/cudart64_12.dll" "$env:RUNNER_TEMP/vocalarc-onnx-cuda-cudart-win32-x64.dll"
-          Copy-Item "$bundle/runtime/cufft64_11.dll" "$env:RUNNER_TEMP/vocalarc-onnx-cuda-cufft-win32-x64.dll"
-          Copy-Item "$bundle/runtime/MSVCP140.dll" "$env:RUNNER_TEMP/vocalarc-onnx-vc-msvcp140-win32-x64.dll"
-          Copy-Item "$bundle/runtime/MSVCP140_1.dll" "$env:RUNNER_TEMP/vocalarc-onnx-vc-msvcp140-1-win32-x64.dll"
-          Copy-Item "$bundle/runtime/VCRUNTIME140.dll" "$env:RUNNER_TEMP/vocalarc-onnx-vc-vcruntime140-win32-x64.dll"
-          Copy-Item "$bundle/runtime/VCRUNTIME140_1.dll" "$env:RUNNER_TEMP/vocalarc-onnx-vc-vcruntime140-1-win32-x64.dll"
+          python onnx/create_release_archive.py --bundle $bundle --output "$env:RUNNER_TEMP/vocalarc-onnx-win32-x64.tar.gz"
           gh release upload $tag --repo $env:GITHUB_REPOSITORY --clobber `
-            "$env:RUNNER_TEMP/vocalarc-onnx-manifest-win32-x64.json" `
-            "$env:RUNNER_TEMP/vocalarc-onnx-model-cuda-win32-x64.onnx" `
-            "$env:RUNNER_TEMP/vocalarc-onnx-sidecar-win32-x64.exe" `
-            "$env:RUNNER_TEMP/vocalarc-onnx-ort-core-win32-x64.dll" `
-            "$env:RUNNER_TEMP/vocalarc-onnx-ort-cuda-win32-x64.dll" `
-            "$env:RUNNER_TEMP/vocalarc-onnx-ort-shared-win32-x64.dll" `
-            "$env:RUNNER_TEMP/vocalarc-onnx-cuda-cublasLt-win32-x64.dll" `
-            "$env:RUNNER_TEMP/vocalarc-onnx-cuda-cublas-win32-x64.dll" `
-            "$env:RUNNER_TEMP/vocalarc-onnx-cuda-cudart-win32-x64.dll" `
-            "$env:RUNNER_TEMP/vocalarc-onnx-cuda-cufft-win32-x64.dll" `
-            "$env:RUNNER_TEMP/vocalarc-onnx-vc-msvcp140-win32-x64.dll" `
-            "$env:RUNNER_TEMP/vocalarc-onnx-vc-msvcp140-1-win32-x64.dll" `
-            "$env:RUNNER_TEMP/vocalarc-onnx-vc-vcruntime140-win32-x64.dll" `
-            "$env:RUNNER_TEMP/vocalarc-onnx-vc-vcruntime140-1-win32-x64.dll"
+            "$env:RUNNER_TEMP/vocalarc-onnx-win32-x64.tar.gz"
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -272,10 +243,17 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ github.event.release.tag_name || inputs.release_tag }}"
-          gh release download $tag --repo $env:GITHUB_REPOSITORY --pattern vocalarc-onnx-model-directml-win32-x64.onnx --dir $env:RUNNER_TEMP
+          $archive = "$env:RUNNER_TEMP/vocalarc-onnx-win32-x64-directml.tar.gz"
+          & gh release download $tag --repo $env:GITHUB_REPOSITORY --pattern vocalarc-onnx-win32-x64-directml.tar.gz --dir $env:RUNNER_TEMP
+          if ($LASTEXITCODE -eq 0) {
+            python onnx/extract_archive_model.py --archive $archive --output "$env:RUNNER_TEMP/vocalarc-onnx-model-directml-win32-x64.onnx"
+          } else {
+            & gh release download $tag --repo $env:GITHUB_REPOSITORY --pattern vocalarc-onnx-model-directml-win32-x64.onnx --dir $env:RUNNER_TEMP
+            if ($LASTEXITCODE -ne 0) { throw "DirectML graph download failed" }
+          }
         env:
           GH_TOKEN: ${{ github.token }}
-      - name: Stage and upload DirectML fallback bundle
+      - name: Archive and upload DirectML fallback runtime
         shell: pwsh
         run: |
           $ort = "$env:RUNNER_TEMP/ort-sdk"
@@ -284,15 +262,9 @@ jobs:
           python onnx/package_runtime.py --sidecar "$env:RUNNER_TEMP/vocalarc-onnx-sidecar.exe" --model "$env:RUNNER_TEMP/vocalarc-onnx-model-directml-win32-x64.onnx" --ort-root $ort --provider directml --provider-library $shared.FullName --target win32-x64-directml --release-version "${{ github.event.release.tag_name || inputs.release_tag }}" --output "$env:RUNNER_TEMP/bundle-win32-x64-directml"
           $tag = "${{ github.event.release.tag_name || inputs.release_tag }}"
           $bundle = "$env:RUNNER_TEMP/bundle-win32-x64-directml"
-          Copy-Item "$bundle/manifest.json" "$env:RUNNER_TEMP/vocalarc-onnx-manifest-win32-x64-directml.json"
-          Copy-Item "$bundle/runtime/vocalarc-onnx-sidecar.exe" "$env:RUNNER_TEMP/vocalarc-onnx-sidecar-win32-x64-directml.exe"
-          Copy-Item "$bundle/runtime/onnxruntime.dll" "$env:RUNNER_TEMP/vocalarc-onnx-ort-core-win32-x64-directml.dll"
-          Copy-Item "$bundle/runtime/onnxruntime_providers_shared.dll" "$env:RUNNER_TEMP/vocalarc-onnx-ort-shared-win32-x64-directml.dll"
+          python onnx/create_release_archive.py --bundle $bundle --output "$env:RUNNER_TEMP/vocalarc-onnx-win32-x64-directml.tar.gz"
           gh release upload $tag --repo $env:GITHUB_REPOSITORY --clobber `
-            "$env:RUNNER_TEMP/vocalarc-onnx-manifest-win32-x64-directml.json" `
-            "$env:RUNNER_TEMP/vocalarc-onnx-sidecar-win32-x64-directml.exe" `
-            "$env:RUNNER_TEMP/vocalarc-onnx-ort-core-win32-x64-directml.dll" `
-            "$env:RUNNER_TEMP/vocalarc-onnx-ort-shared-win32-x64-directml.dll"
+            "$env:RUNNER_TEMP/vocalarc-onnx-win32-x64-directml.tar.gz"
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -323,6 +295,7 @@ jobs:
           tar -xzf "$RUNNER_TEMP/${{ matrix.sdk }}" -C "$RUNNER_TEMP"
         env:
           GH_TOKEN: ${{ github.token }}
+
       - name: Build ONNX Runtime with CoreML for Intel macOS
         if: matrix.sdk == 'source'
         run: |
@@ -342,18 +315,64 @@ jobs:
       - name: Download CoreML graph from this release
         run: |
           tag="${{ github.event.release.tag_name || inputs.release_tag }}"
-          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern vocalarc-onnx-model-coreml-${{ matrix.target }}.onnx --dir "$RUNNER_TEMP"
+          archive="$RUNNER_TEMP/vocalarc-onnx-${{ matrix.target }}.tar.gz"
+          if gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+            --pattern "vocalarc-onnx-${{ matrix.target }}.tar.gz" --dir "$RUNNER_TEMP"; then
+            python3 onnx/extract_archive_model.py \
+              --archive "$archive" \
+              --output "$RUNNER_TEMP/vocalarc-onnx-model-coreml-${{ matrix.target }}.onnx"
+          else
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+              --pattern vocalarc-onnx-model-coreml-${{ matrix.target }}.onnx --dir "$RUNNER_TEMP"
+          fi
         env:
           GH_TOKEN: ${{ github.token }}
-      - name: Stage and upload macOS bundle
+      - name: Archive and upload macOS runtime
         run: |
           if [[ "${{ matrix.sdk }}" == "source" ]]; then ort="$RUNNER_TEMP/ort-sdk"; else ort="$RUNNER_TEMP/${{ matrix.sdk }}"; ort="${ort%.tgz}"; fi
           python3 onnx/package_runtime.py --sidecar "$RUNNER_TEMP/vocalarc-onnx-sidecar" --model "$RUNNER_TEMP/vocalarc-onnx-model-coreml-${{ matrix.target }}.onnx" --ort-root "$ort" --provider coreml --target '${{ matrix.target }}' --release-version "${{ github.event.release.tag_name || inputs.release_tag }}" --output "$RUNNER_TEMP/bundle-${{ matrix.target }}"
           tag="${{ github.event.release.tag_name || inputs.release_tag }}"; bundle="$RUNNER_TEMP/bundle-${{ matrix.target }}"
-          cp "$bundle/manifest.json" "$RUNNER_TEMP/vocalarc-onnx-manifest-${{ matrix.target }}.json"
-          cp "$bundle/models/model.onnx" "$RUNNER_TEMP/vocalarc-onnx-model-coreml-${{ matrix.target }}.onnx"
-          cp "$bundle/runtime/vocalarc-onnx-sidecar" "$RUNNER_TEMP/vocalarc-onnx-sidecar-${{ matrix.target }}"
-          cp "$bundle/runtime/libonnxruntime.dylib" "$RUNNER_TEMP/vocalarc-onnx-ort-core-${{ matrix.target }}.dylib"
-          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber "$RUNNER_TEMP/vocalarc-onnx-manifest-${{ matrix.target }}.json" "$RUNNER_TEMP/vocalarc-onnx-model-coreml-${{ matrix.target }}.onnx" "$RUNNER_TEMP/vocalarc-onnx-sidecar-${{ matrix.target }}" "$RUNNER_TEMP/vocalarc-onnx-ort-core-${{ matrix.target }}.dylib"
+          python3 onnx/create_release_archive.py \
+            --bundle "$bundle" \
+            --output "$RUNNER_TEMP/vocalarc-onnx-${{ matrix.target }}.tar.gz"
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber \
+            "$RUNNER_TEMP/vocalarc-onnx-${{ matrix.target }}.tar.gz"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  cleanup_legacy_assets:
+    needs: [linux, windows_cuda, windows_directml, macos]
+    if: >-
+      always() &&
+      needs.linux.result == 'success' &&
+      needs.windows_cuda.result == 'success' &&
+      needs.windows_directml.result == 'success' &&
+      needs.macos.result == 'success' &&
+      ((github.event_name == 'release' && startsWith(github.event.release.tag_name, 'vocalarc-onnx-v')) ||
+      (github.event_name == 'workflow_dispatch' && startsWith(inputs.release_tag, 'vocalarc-onnx-v')))
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Remove legacy loose release assets
+        run: |
+          tag="${{ github.event.release.tag_name || inputs.release_tag }}"
+          archives='vocalarc-onnx-linux-x64.tar.gz
+          vocalarc-onnx-win32-x64.tar.gz
+          vocalarc-onnx-win32-x64-directml.tar.gz
+          vocalarc-onnx-darwin-x64.tar.gz
+          vocalarc-onnx-darwin-arm64.tar.gz'
+          for archive in $archives; do
+            gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets \
+              --jq '.assets[].name' | grep -Fx "$archive" >/dev/null
+          done
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq '.assets[].name' |
+            while IFS= read -r asset; do
+              case "$asset" in
+                vocalarc-onnx-linux-x64.tar.gz|vocalarc-onnx-win32-x64.tar.gz|vocalarc-onnx-win32-x64-directml.tar.gz|vocalarc-onnx-darwin-x64.tar.gz|vocalarc-onnx-darwin-arm64.tar.gz)
+                  ;;
+                vocalarc-onnx-*)
+                  gh release delete-asset "$tag" "$asset" --repo "$GITHUB_REPOSITORY" --yes
+                  ;;
+              esac
+            done
         env:
           GH_TOKEN: ${{ github.token }}

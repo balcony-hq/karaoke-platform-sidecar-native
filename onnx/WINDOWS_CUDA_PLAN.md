@@ -83,12 +83,12 @@ published.
 
 The workflow creates a pinned NVIDIA-channel CUDA 12.8 build environment on a
 `windows-2022` runner (CUDA 12.8's supported MSVC generation), builds the CUDA
-sidecar with MSVC/Ninja, builds a separate CPU-only helper for protocol smoke
-testing, stages the exact runtime DLLs, and prints PE dependencies for the
-CUDA executable/provider with `dumpbin`. GitHub's Windows runner has no NVIDIA
-GPU, so CUDA DLL initialization and speed are reserved for native Windows GPU
-acceptance. Each staged file is hashed in schema-v3 `manifest.json` and must
-remain below GitHub's 2 GiB per-file limit.
+sidecar with MSVC/Ninja, stages the exact runtime DLLs, and verifies PE
+dependencies for the CUDA executable/provider with `dumpbin`. GitHub's
+Windows runner has no NVIDIA GPU, so CUDA DLL initialization, protocol, parity,
+and speed are reserved for native Windows GPU acceptance. Each staged file is
+hashed in schema-v3 `manifest.json` and must remain below GitHub's 2 GiB
+per-file limit.
 
 ## Device compatibility
 

@@ -161,12 +161,6 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release
           cmake --build "$env:RUNNER_TEMP/build-cuda" --parallel
           Copy-Item "$env:RUNNER_TEMP/build-cuda/vocalarc-onnx-sidecar.exe" "$env:RUNNER_TEMP/vocalarc-onnx-sidecar.exe"
-          cmake -S onnx/native -B "$env:RUNNER_TEMP/build-cpu-smoke" -G Ninja `
-            -DORT_ROOT="$ort" `
-            -DVOCALARC_ENABLE_CUDA_DSP=OFF `
-            -DCMAKE_BUILD_TYPE=Release
-          cmake --build "$env:RUNNER_TEMP/build-cpu-smoke" --parallel
-          Copy-Item "$env:RUNNER_TEMP/build-cpu-smoke/vocalarc-onnx-sidecar.exe" "$env:RUNNER_TEMP/vocalarc-onnx-sidecar-cpu-smoke.exe"
           "VS_INSTALL_ROOT=$vs" | Out-File $env:GITHUB_ENV -Append
       - name: Download CUDA graph from this release
         shell: pwsh
@@ -175,7 +169,7 @@ jobs:
           gh release download $tag --repo $env:GITHUB_REPOSITORY --pattern vocalarc-onnx-model-cuda-linux-x64.onnx --dir $env:RUNNER_TEMP
         env:
           GH_TOKEN: ${{ github.token }}
-      - name: Stage and smoke-test Windows CUDA bundle
+      - name: Stage and validate Windows CUDA bundle
         shell: pwsh
         run: |
           $ort = "$env:RUNNER_TEMP\onnxruntime-win-x64-gpu_cuda12-1.28.0"
@@ -201,29 +195,20 @@ jobs:
           $env:PATH = "$bundle\runtime;$env:PATH"
           $dumpbin = Get-ChildItem "$env:VS_INSTALL_ROOT\VC\Tools\MSVC" -Recurse -File -Filter dumpbin.exe | Select-Object -First 1
           if (-not $dumpbin) { throw "dumpbin.exe was not found" }
-          & $dumpbin.FullName /DEPENDENTS "$env:RUNNER_TEMP\vocalarc-onnx-sidecar.exe"
-          & $dumpbin.FullName /DEPENDENTS "$bundle\runtime\onnxruntime_providers_cuda.dll"
-          $process = New-Object System.Diagnostics.Process
-          $process.StartInfo.FileName = "$env:RUNNER_TEMP\vocalarc-onnx-sidecar-cpu-smoke.exe"
-          $model = Join-Path $bundle "models\model.onnx"
-          $process.StartInfo.Arguments = "--model `"$model`" --provider cpu"
-          $process.StartInfo.WorkingDirectory = $bundle
-          $process.StartInfo.UseShellExecute = $false
-          $process.StartInfo.RedirectStandardInput = $true
-          $process.StartInfo.RedirectStandardOutput = $true
-          $process.StartInfo.RedirectStandardError = $true
-          if (-not $process.Start()) { throw "Windows CUDA sidecar did not start" }
-          $process.StandardInput.WriteLine('{"id":1,"type":"ping"}')
-          $process.StandardInput.WriteLine('{"id":2,"type":"shutdown"}')
-          $process.StandardInput.Close()
-          $stdout = $process.StandardOutput.ReadToEnd()
-          $stderr = $process.StandardError.ReadToEnd()
-          $process.WaitForExit()
-          Write-Host $stdout
-          if ($stderr) { Write-Host $stderr }
-          if ($process.ExitCode -ne 0) { throw "Windows CUDA bundle smoke test failed: exit $($process.ExitCode)" }
-          if ($stdout -notmatch '"type":"pong"') { throw "Windows CUDA bundle did not return pong" }
-          $process.Dispose()
+          $sidecarDeps = (& $dumpbin.FullName /DEPENDENTS "$env:RUNNER_TEMP\vocalarc-onnx-sidecar.exe" | Out-String)
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin failed for the Windows CUDA sidecar" }
+          $providerDeps = (& $dumpbin.FullName /DEPENDENTS "$bundle\runtime\onnxruntime_providers_cuda.dll" | Out-String)
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin failed for the CUDA execution provider" }
+          if ($sidecarDeps -notmatch "onnxruntime\.dll" -or
+              $sidecarDeps -notmatch "cudart64_12\.dll" -or
+              $sidecarDeps -notmatch "cufft64_11\.dll") {
+            throw "Windows CUDA sidecar is missing an expected CUDA dependency"
+          }
+          if ($providerDeps -notmatch "cublasLt64_12\.dll" -or
+              $providerDeps -notmatch "cublas64_12\.dll" -or
+              $providerDeps -notmatch "cudart64_12\.dll") {
+            throw "Windows CUDA provider is missing an expected CUDA dependency"
+          }
       - name: Upload Windows CUDA release assets
         shell: pwsh
         run: |

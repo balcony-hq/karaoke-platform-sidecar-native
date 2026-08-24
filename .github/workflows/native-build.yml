@@ -118,6 +118,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
   windows_cuda:
+    needs: linux
     if: >-
       (github.event_name == 'release' && startsWith(github.event.release.tag_name, 'vocalarc-onnx-v')) ||
       (github.event_name == 'workflow_dispatch' && startsWith(inputs.release_tag, 'vocalarc-onnx-v'))

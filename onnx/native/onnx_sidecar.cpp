@@ -632,6 +632,7 @@ class Separator {
 #if defined(VOCALARC_ENABLE_CUDA_DSP)
       enable_cuda_graph = options_.cuda_graph;
 #endif
+#if defined(VOCALARC_ENABLE_CUDA_DSP)
       Ort::CUDAProviderOptions options;
       options.Update({
           {"device_id", "0"},
@@ -640,6 +641,12 @@ class Separator {
           {"use_tf32", "1"},
       });
       session_options.AppendExecutionProvider_CUDA_V2(*options);
+#else
+      OrtCUDAProviderOptions options{};
+      options.device_id = 0;
+      options.do_copy_in_default_stream = 1;
+      session_options.AppendExecutionProvider_CUDA(options);
+#endif
       provider_ = "CUDAExecutionProvider";
       cuda_graph_enabled_ = enable_cuda_graph;
     };

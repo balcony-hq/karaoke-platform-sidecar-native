@@ -11,6 +11,8 @@
 
 #include <onnxruntime_cxx_api.h>
 
+#include "audio_layout.h"
+
 #if defined(VOCALARC_ENABLE_CUDA_DSP)
 #include "cuda_dsp.h"
 #endif
@@ -911,11 +913,10 @@ class Separator {
     output.data.resize(static_cast<size_t>(kChannels) * working.samples);
     for (size_t index = 0; index < output.data.size(); ++index) output.data[index] = result[index] / std::max(counter[index], 1.0e-12f);
     if (mix.samples > 2 * border) {
+      const size_t padded_samples = output.samples;
+      output.data = vocalarc::crop_planar_audio(
+          output.data, kChannels, padded_samples, border, mix.samples);
       output.samples = mix.samples;
-      output.data.resize(static_cast<size_t>(kChannels) * output.samples);
-      for (int channel = 0; channel < kChannels; ++channel) {
-        std::copy(output.channel(channel) + border, output.channel(channel) + border + mix.samples, output.channel(channel));
-      }
     }
     return output;
   }
